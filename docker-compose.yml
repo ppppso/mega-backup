@@ -1,0 +1,22 @@
+services:
+  mega-backup:
+    build: .
+    image: mega-backup:local
+    container_name: mega-backup
+    hostname: mega-backup
+    restart: unless-stopped
+    env_file: .env
+    # Small init process as PID 1: forwards signals and reaps zombies.
+    init: true
+    # Give MEGAcmd time to save its state on shutdown (Docker's default is 10 s).
+    stop_grace_period: 60s
+    volumes:
+      - ${CONFIG_DIR:?set CONFIG_DIR in .env}:/config
+      - ${SYNC_DIR:?set SYNC_DIR in .env}:/data/current
+      - ${REPO_DIR:?set REPO_DIR in .env}:/data/repo
+      - ${RESTORE_DIR:?set RESTORE_DIR in .env}:/data/restore
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
