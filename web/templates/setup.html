@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% macro mark(done) %}<span class="mark {{ 'done' if done else 'todo' }}">{{ '✓' if done else '•' }}</span>{% endmacro %}
+{% block body %}
+<h1>Setup</h1>
+{% if steps.complete %}<p class="flash ok">Setup is complete. <a href="{{ url_for('index') }}">Go to Status</a>.</p>{% endif %}
+
+<section class="card">
+  <h2>{{ mark(steps.folders.done) }} 1. Folders</h2>
+  <ul class="plain">
+    <li>{{ mark(steps.folders.current) }} <b>MEGA folder</b> (your MEGA files, two-way synced):
+      {{ 'chosen' if steps.folders.current else 'not chosen yet' }}</li>
+    <li>{{ mark(steps.folders.repo) }} <b>Backup folder</b> (the snapshots):
+      {{ 'chosen' if steps.folders.repo else 'not chosen yet' }}</li>
+  </ul>
+  {% if steps.folders.overlap %}
+  <p class="flash error">These two folders overlap. Pick a Backup folder that is not inside the MEGA folder.</p>
+  {% endif %}
+  {% if not steps.folders.done %}
+  <p>On Umbrel: open this app's settings in Umbrel, pick both folders, and save. The app restarts and this page updates. Use two separate, empty folders.
+  With plain Docker Compose: set SYNC_DIR and REPO_DIR in <code>.env</code>.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>{{ mark(steps.login.done) }} 2. MEGA login</h2>
+  {% if steps.login.done %}
+  <p>Logged in as <b>{{ steps.login.who }}</b>.</p>
+  {% elif not steps.login.server %}
+  <p>MEGAcmd is starting… reload this page in a few seconds.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('mega_login') }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label>Email <input type="email" name="email" value="{{ email }}" autocomplete="username" required></label>
+    <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+    {% if needs_code %}
+    <label>2FA code <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus></label>
+    {% else %}
+    <details><summary>My account uses two-factor authentication</summary>
+      <label>2FA code <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"></label>
+    </details>
+    {% endif %}
+    <button>Log in to MEGA</button>
+  </form>
+  <p class="hint">Your password goes straight to MEGAcmd and is never stored. MEGAcmd keeps a login
+  session instead, in the app's private data.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>{{ mark(steps.password.done) }} 3. Backup password</h2>
+  {% if steps.password.done %}
+  <p>Saved.</p>
+  {% elif restic_password %}
+  <p>The snapshots are encrypted with this password. <b>Without it they cannot be read</b>, for example
+  if this device breaks. Save it somewhere off this device, such as a password manager.</p>
+  <p class="secret"><code id="pw">{{ restic_password }}</code></p>
+  <form method="post" action="{{ url_for('password_saved') }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label class="check"><input type="checkbox" name="saved" value="1" required> I have saved this password</label>
+    <button>Continue</button>
+  </form>
+  {% else %}
+  <p>The password is created when the app starts… reload in a few seconds.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>{{ mark(steps.folder.done) }} 4. What to back up</h2>
+  {% if steps.folder.done %}
+  <p>MEGA folder: <b>{{ steps.folder.path }}</b></p>
+  {% elif not (steps.folders.done and steps.login.done and steps.password.done) %}
+  <p>Finish the steps above first.</p>
+  {% else %}
+  <p>Pick the folder in your MEGA account to keep in sync. Changes go both ways: files you add, change
+  or delete in the local folder (for example in Umbrel's Files) also change on MEGA, and the other way
+  round. The nightly snapshots let you get older versions back.</p>
+  <p class="path">Current: <b>{{ browse }}</b>
+    {% if browse != '/' %} · <a href="{{ url_for('setup', path=parent) }}">up one level</a>{% endif %}</p>
+  {% if folder_error %}<p class="flash error">{{ folder_error }}</p>{% endif %}
+  <ul class="folders">
+    {% for f in folders %}
+    {% set p = (browse.rstrip('/') ~ '/' ~ f) %}
+    <li><a href="{{ url_for('setup', path=p) }}">📁 {{ f }}</a></li>
+    {% else %}
+    <li class="hint">No sub-folders here.</li>
+    {% endfor %}
+  </ul>
+  <form method="post" action="{{ url_for('start') }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="path" value="{{ browse }}">
+    {% if not steps.folder.local_empty %}
+    <p class="flash error">The local MEGA folder already has files. They will be <b>uploaded to MEGA</b>
+    and merged with what is there.</p>
+    <label class="check"><input type="checkbox" name="merge" value="1" required> Yes, merge them into MEGA</label>
+    {% endif %}
+    <button>Back up {{ 'the whole account' if browse == '/' else browse }}</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backup for MEGA</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <span class="brand">Backup for MEGA</span>
+  {% if session.auth %}
+  <nav>
+    <a href="{{ url_for('index') }}" {% if page == 'status' %}aria-current="page"{% endif %}>Status</a>
+    <a href="{{ url_for('setup') }}" {% if page == 'setup' %}aria-current="page"{% endif %}>Setup</a>
+    <a href="{{ url_for('log_page') }}" {% if page == 'log' %}aria-current="page"{% endif %}>Log</a>
+    <form method="post" action="{{ url_for('logout') }}" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="link">Log out</button>
+    </form>
+  </nav>
+  {% endif %}
+</header>
+<main>
+  {% for cat, msg in get_flashed_messages(with_categories=true) %}
+  <p class="flash {{ cat }}">{{ msg }}</p>
+  {% endfor %}
+  {% block body %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -10,6 +10,9 @@ services:
     init: true
     # Give MEGAcmd time to save its state on shutdown (Docker's default is 10 s).
     stop_grace_period: 60s
+    # The web UI. Open http://<this machine>:2947 (change WEB_PORT in .env).
+    ports:
+      - "${WEB_PORT:-2947}:8080"
     volumes:
       - ${CONFIG_DIR:?set CONFIG_DIR in .env}:/config
       - ${SYNC_DIR:?set SYNC_DIR in .env}:/data/current

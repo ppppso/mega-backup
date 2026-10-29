@@ -41,28 +41,43 @@ MEGA cloud folder  <── MEGAcmd sync (official, 2-way) ──>  current/   (U
    cp .env.example .env
    nano .env
    ```
-2. In `.env`, set at least `MEGA_REMOTE_PATH` (the MEGA folder, e.g. `/Photos`) and
-   `TZ`. Check the paths (see [Paths on Umbrel](#paths-on-umbrel)).
+2. In `.env`, set `TZ` and check the paths (see [Paths on Umbrel](#paths-on-umbrel)).
+   `MEGA_REMOTE_PATH` is optional: you can pick the MEGA folder in the web page instead.
+   Set `APP_PASSWORD` to choose the web page's password (otherwise one is generated).
 3. Build and start:
    ```sh
    docker compose up -d --build
    docker logs -f mega-backup
    ```
-4. **Save the restic password.** On first start the logs say a password was
-   generated. Copy it into your password manager **now**:
+4. Open **http://umbrel.local:2947** (or your machine's address; the port is
+   `WEB_PORT`) and log in with the app password. If you didn't set one:
    ```sh
-   docker exec mega-backup cat /config/restic-password
+   docker exec mega-backup cat /config/app-password
    ```
-   Without it the backups can't be read, not even by you.
-5. **Log in to MEGA (once):**
-   ```sh
-   docker exec -it mega-backup mega-login you@example.com
-   ```
-   It asks for your password. With two-factor auth, add `--auth-code=123456`.
-   The session is stored in `config/`, so this survives restarts and rebuilds.
-6. Watch `docker logs -f mega-backup`. It creates the sync and MEGAcmd starts
-   downloading into `current/`. The first backup runs at `BACKUP_TIME`.
-   To run one right away (after the download finishes): `docker exec mega-backup backup.sh`.
+5. Follow the **Setup** page:
+   - **MEGA login:** email, password, and the 2FA code if your account has it. The
+     password goes straight to MEGAcmd and isn't stored; MEGAcmd keeps a session in
+     `config/`, so this survives restarts and rebuilds.
+   - **Backup password:** copy the restic password into your password manager
+     **now**. Without it the backups can't be read, not even by you.
+   - **What to back up:** browse your MEGA folders and pick one (skipped if
+     `MEGA_REMOTE_PATH` is set).
+6. The Status page then shows the sync downloading into `current/`. The first backup
+   runs at `BACKUP_TIME`. To run one right away (after the download finishes):
+   `docker exec mega-backup backup.sh`.
+
+**Without the web page** (e.g. over SSH only), the same steps work in a terminal:
+```sh
+docker exec mega-backup cat /config/restic-password     # save it
+docker exec -it mega-backup mega-cmd
+MEGA CMD> login you@example.com
+Password:                     # typed, not shown
+MEGA CMD> exit --only-shell
+```
+Use `exit --only-shell`: a plain `exit` (or `quit`) stops the MEGAcmd server too
+(the container then restarts). Don't use `mega-login email password`: it puts the
+password on the command line. MEGAcmd can't take passwords containing `"` or `\`,
+in the web page or the terminal.
 
 The sync is only created if `current/` is empty. That avoids merging stray local
 files up into MEGA by mistake. Override with `ALLOW_NONEMPTY_INIT=1` only if you
@@ -168,9 +183,14 @@ Changing only file timestamps doesn't count as a change. Content changes do.
 
 ## Settings (`.env`)
 
+Choices made in the web page are saved in `config/settings.json` and take precedence
+over `.env`.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `MEGA_REMOTE_PATH` | (required) | MEGA folder to back up |
+| `MEGA_REMOTE_PATH` | empty | MEGA folder to back up (or pick it on the Setup page) |
+| `WEB_PORT` | 2947 | port of the web page on this machine |
+| `APP_PASSWORD` | generated | password for the web page (`/config/app-password` if generated) |
 | `CONFIG_DIR` / `SYNC_DIR` / `REPO_DIR` / `RESTORE_DIR` | see `.env.example` | host folders |
 | `PUID` / `PGID` | 1000 | owner of all files (1000 = `umbrel` user) |
 | `TZ` | UTC | timezone for `BACKUP_TIME` and logs |
@@ -182,6 +202,9 @@ Changing only file timestamps doesn't count as a change. Content changes do.
 | `BACKUP_ON_START` | 0 | 1 = back up on every container start |
 | `ALLOW_NONEMPTY_INIT` | 0 | 1 = allow creating the sync into a non-empty folder |
 
+Retention keeps one snapshot per day (the last one), so if you run `backup.sh` by
+hand several times in a day, the next prune removes the earlier ones from that day.
+
 For `backup.sh` run by hand: `DRY_RUN=1` (show what pruning would delete) and
 `FORCE_CHECK=1` (run the repo check now), e.g.
 `docker exec -e DRY_RUN=1 mega-backup backup.sh`.
@@ -192,8 +215,14 @@ For `backup.sh` run by hand: `DRY_RUN=1` (show what pruning would delete) and
   the restic password. Don't share it or put it in a public place.
 - The repo is encrypted, so a copy of `repo/` alone is useless without the password.
 - Your MEGA password is never stored. Only the session is.
+- The web page can control your MEGA account, so it has its own password, even on
+  your home network. Logins are rate-limited.
 
 ## MEGA-side settings worth checking
+
+- **`.megaignore`**: MEGA puts this file in the synced folder. By default it skips
+  hidden files (names starting with `.`), `~*`, `*.tmp`, `Thumbs.db` and similar, so
+  those are neither synced nor backed up. Edit it (in MEGA or `current/`) if you need them.
 
 - **Rubbish bin retention**: how long MEGA keeps deleted files (depends on your plan).
 - **File versioning**: on by default; keeps old versions of changed files on MEGA.
@@ -202,17 +231,17 @@ For `backup.sh` run by hand: `DRY_RUN=1` (show what pruning would delete) and
 
 Verified while building this (MEGAcmd 2.6.0, restic 0.19.1):
 - `mega-sync` columns and values (`RUN_STATE` Running, `ERROR` NO when healthy).
-- `mega-whoami` exits 0 when logged in and 57 when not. The Docker health check uses it.
-- `--auth-code` is the 2FA option of `mega-login`, and `mega-login <email>` asks for
-  the password.
+- `mega-whoami` exits 0 when logged in and 57 when not. The web page uses it.
+- One-shot `mega-login <email>` does NOT ask for the password ("Extra args required
+  in non-interactive mode"); `login <email>` inside the `mega-cmd` shell does, and the
+  shell uses the already-running server.
 - restic's JSON output fields used by the mass-change alert.
 
 Still to verify on the first real run (needs a MEGA account):
-- [ ] The session survives `docker compose down && up` (it should: it's in `config/`).
-- [ ] A file deleted on MEGA ends up in `current/.debris/` locally (MEGA's desktop app
-      does this; `.debris` is excluded from backups either way).
-- [ ] `docker exec mega-backup mega-sync` shows `Running  Synced  NO` once the first
-      download is done, and the nightly log has no sync problem.
+- [x] The session survives `docker compose down && up` (tested 2026-10-29, MEGAcmd 2.7.0).
+- [x] A file deleted on MEGA ends up in `current/.debris/<date>/` locally (tested).
+- [x] `mega-sync` shows `Running  Synced  NO`; local adds go up to MEGA; mass deletion
+      sets the prune hold; restore works; empty-folder guard blocks MEGAcmd (tested on a PC).
 - [ ] Memory use is fine on your device during the first sync and backup.
 - [ ] After the next umbrelOS update, the container is still there and running
       (`docker ps`). If not, run `docker compose up -d` again from the repo folder.
@@ -230,29 +259,49 @@ docker compose build
 # backup.sh logic (no MEGA account needed), inside the image:
 docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint bash \
   mega-backup:local /tests/backup_test.sh
+# web UI (MEGAcmd faked): app login, CSRF, MEGA login incl. 2FA, setup, status:
+docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint python3 \
+  mega-backup:local -I /tests/web_test.py
 # whole-container behaviour (logged out): startup, guards, stop, permissions:
 tests/container_test.sh
 # lint
-docker run --rm -v "$PWD/scripts:/s:ro" -w /s koalaman/shellcheck:stable -x -P /s $(cd scripts && echo *.sh)
+docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 -x -P scripts scripts/*.sh tests/*.sh
 ```
 
 `backup_test.sh` covers: empty source; first backup; dedup (unchanged run and folder
 rename add almost no data); deleted/changed files restorable; timestamp-only changes
 don't trip the alert; mass deletion and mass overwrite set the sticky prune hold;
 retention with old snapshots (dry run and real); stale lock left by a killed restic;
-no concurrent runs; repo ID mismatch / missing repo; healthcheck start/fail/success
-pings with the log as body.
+no concurrent runs; repo ID mismatch / missing repo; `last-run.json`; settings
+precedence and invalid values; refusing to back up when the Backup folder isn't
+mounted; healthcheck start/fail/success pings with the log as body.
+
+`web_test.py` covers: every page needs the app login; CSRF on every form; login
+rate limit; no open redirect; MEGA login (wrong password, OK, 2FA, input checks; the
+password never reaches a command line, environment or file, and the shell is left
+with `exit --only-shell`); restic password step; MEGA folder browser and start
+(non-empty folder needs the merge confirmation; bad paths refused); status API;
+prune hold and running-backup detection; log page; settings precedence/validation.
 
 `container_test.sh` covers: first start (password, repo init, login hint, one server
-as PUID, health check fails when logged out); `docker exec` commands run as PUID and
-don't start a second server; manual backup leaves nothing root-owned; stop in < 10 s;
-machine-id and repo persist across recreation; missing repo not re-created;
-empty-folder guard blocks MEGAcmd until the folder has content.
+as PUID, web UI up as PUID and behind its login, health check passes when logged
+out, engine status, private app log); `docker exec` commands run as PUID and don't
+start a second server; manual backup leaves nothing root-owned; the container exits
+if the web UI dies; stop in < 10 s; machine-id and repo persist across recreation;
+missing repo not re-created; empty-folder guard blocks MEGAcmd until the folder has
+content; overlapping folders detected; no repo created without a mounted Backup
+folder; MEGAcmd not started when the MEGA folder isn't mounted after a sync existed.
 
 `SKIP_SYNC_CHECK=1` skips the MEGA sync check in `backup.sh`. It's for tests only.
 
 Files: `scripts/entrypoint.sh` (root: machine-id, permissions, drop to PUID),
-`main.sh` (guards, repo setup, MEGAcmd, login wait, sync, scheduler), `backup.sh`
-(one nightly run), `healthcheck.sh`, `as-user.sh` (makes `docker exec` commands run as
+`supervise.sh` (runs the engine and the web UI; stops both if one exits),
+`logsink.py` (copies output to `config/logs/app.log`), `main.sh` (the engine: guards,
+repo setup, MEGAcmd, login and setup wait, sync, scheduler), `backup.sh` (one nightly
+run), `healthcheck.sh` (MEGAcmd server and web UI up), `as-user.sh` (makes `docker exec` commands run as
 PUID; the Dockerfile puts a wrapper for every `mega-*` command and `restic` in front of
-the real ones), `lib.sh` (shared helpers).
+the real ones), `lib.sh` (shared helpers, settings loader, mount checks).
+`share/settings-schema.json` lists every setting with its default and validation;
+the engine and the web UI both read it. `web/` is the web UI (Flask, served by
+waitress): `app.py` (pages, login, CSRF), `engine.py` (reads state), `megalogin.py`
+(MEGA login through the `mega-cmd` shell), `settings.py`.

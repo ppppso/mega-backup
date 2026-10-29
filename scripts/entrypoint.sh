@@ -10,7 +10,7 @@ PGID="${PGID:-1000}"
 
 if [ "$(id -u)" != 0 ]; then
   log "Not started as root; skipping machine-id and permission setup."
-  exec /usr/local/bin/main.sh
+  exec /usr/local/bin/supervise.sh
 fi
 
 case "$PUID$PGID" in
@@ -39,4 +39,4 @@ done
 chmod 700 "$MB_CONFIG"
 
 # --clear-groups (not --init-groups): PUID usually has no /etc/passwd entry here.
-exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups -- /usr/local/bin/main.sh
+exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups -- /usr/local/bin/supervise.sh

@@ -11,6 +11,8 @@ export MB_CONFIG="$T/config" MB_CURRENT="$T/current"
 export RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/config/restic-password"
 export RESTIC_CACHE_DIR="$T/cache"
 export SKIP_SYNC_CHECK=1 HEALTHCHECK_URL="" CHECK_WEEKDAY=0
+# Temp dirs are not mount points; the mount check has its own test below.
+export MB_REQUIRE_MOUNTS=0
 export KEEP_DAILY=3 KEEP_MONTHLY=2 MAX_DROP_PERCENT=20 MAX_CHANGE_PERCENT=20
 mkdir -p "$MB_CONFIG" "$MB_CURRENT"
 echo test-password > "$RESTIC_PASSWORD_FILE"
@@ -134,6 +136,44 @@ mv "$RESTIC_REPOSITORY" "$T/repo.away"
 check "missing repo fails"            [ "$(run)" = 1 ]
 check "  ...with clear message"       grep -q 'cannot open restic repo' "$OUT"
 mv "$T/repo.away" "$RESTIC_REPOSITORY"
+
+echo "== last-run.json"
+check "ok run writes last-run.json"   [ "$(run)" = 0 ]
+check "  ...result ok"                jq -e '.result == "ok" and .problems == []' "$MB_CONFIG/last-run.json"
+check "  ...with snapshot and counts" jq -e '(.snapshot_id | length) == 64 and .files_total > 0 and .bytes_added != null' "$MB_CONFIG/last-run.json"
+check "  ...and the diff"             jq -e '.diff.added != null and .diff.removed != null' "$MB_CONFIG/last-run.json"
+mv "$RESTIC_REPOSITORY" "$T/repo.away"
+run >/dev/null
+mv "$T/repo.away" "$RESTIC_REPOSITORY"
+check "failed run: result failed"     jq -e '.result == "failed" and .snapshot_id == null' "$MB_CONFIG/last-run.json"
+check "  ...with the problem"         jq -e '.problems[0] | test("cannot open restic repo")' "$MB_CONFIG/last-run.json"
+check "no temp files left"            [ -z "$(find "$MB_CONFIG" -name '*.tmp.*')" ]
+
+echo "== settings"
+forget_line() { grep -o 'restic forget.*' "$OUT"; }
+run >/dev/null
+check "env value used (KEEP_DAILY=3)" bash -c "grep -q -- '--keep-daily 3 ' <<< '$(forget_line)'"
+echo '{"keep_daily": 7}' > "$MB_CONFIG/settings.json"
+run >/dev/null
+check "settings.json beats env"       bash -c "grep -q -- '--keep-daily 7 ' <<< '$(forget_line)'"
+echo '{"keep_daily": "lots", "keep_monthly": -1}' > "$MB_CONFIG/settings.json"
+run >/dev/null
+check "invalid values: default used"  bash -c "grep -q -- '--keep-daily 90 --keep-monthly 24 ' <<< '$(forget_line)'"
+check "  ...with a warning"           grep -q 'Invalid keep_daily in settings.json' "$OUT"
+echo 'not json' > "$MB_CONFIG/settings.json"
+run >/dev/null
+check "broken settings.json: env used" bash -c "grep -q -- '--keep-daily 3 ' <<< '$(forget_line)'"
+check "  ...with a warning"           grep -q 'settings.json is not a valid JSON object' "$OUT"
+rm "$MB_CONFIG/settings.json"
+KEEP_DAILY=abc run >/dev/null
+check "invalid env: default used"     bash -c "grep -q -- '--keep-daily 90 ' <<< '$(forget_line)'"
+check "  ...with a warning"           grep -q 'Invalid keep_daily in environment' "$OUT"
+
+echo "== Backup folder must be mounted"
+n_before="$(snap_count)"
+check "not mounted: run fails"        [ "$(MB_REQUIRE_MOUNTS=1 run)" = 1 ]
+check "  ...with a clear message"     grep -q 'no Backup folder' "$OUT"
+check "  ...and no snapshot"          [ "$(snap_count)" = "$n_before" ]
 
 echo "== healthcheck pings"
 # Stub curl: records the URL and the POST body.

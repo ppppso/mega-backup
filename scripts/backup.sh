@@ -13,12 +13,14 @@ if [ "$(id -u)" = 0 ]; then
 fi
 cd /tmp
 
-KEEP_DAILY="${KEEP_DAILY:-90}"
-KEEP_MONTHLY="${KEEP_MONTHLY:-24}"
-MAX_DROP_PERCENT="${MAX_DROP_PERCENT:-20}"
-MAX_CHANGE_PERCENT="${MAX_CHANGE_PERCENT:-20}"
-CHECK_WEEKDAY="${CHECK_WEEKDAY:-7}"
-CHECK_READ_PERCENT="${CHECK_READ_PERCENT:-5}"
+load_settings
+KEEP_DAILY="$CFG_KEEP_DAILY"
+KEEP_MONTHLY="$CFG_KEEP_MONTHLY"
+MAX_DROP_PERCENT="$CFG_MAX_DROP_PERCENT"
+MAX_CHANGE_PERCENT="$CFG_MAX_CHANGE_PERCENT"
+CHECK_WEEKDAY="$CFG_CHECK_WEEKDAY"
+CHECK_READ_PERCENT="$CFG_CHECK_READ_PERCENT"
+HEALTHCHECK_URL="$CFG_HEALTHCHECK_URL"
 SYNC_WAIT_MAX="${SYNC_WAIT_MAX:-1800}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE_CHECK="${FORCE_CHECK:-0}"
@@ -38,12 +40,37 @@ exec > >(tee -a "$RUN_LOG") 2>&1
 
 PROBLEMS=()
 HOLD_SET_NOW=0
+STARTED="$(date -Iseconds)"
+# Filled in as the run goes; written to last-run.json by finish().
+new_id=""; summary=""; stats=""
 problem() {
   PROBLEMS+=("$*")
   log "PROBLEM: $*"
 }
 
+# Summary of this run for the web UI, written atomically.
+write_last_run() {
+  local tmp="$MB_CONFIG/last-run.json.tmp.$$"
+  printf '%s\n' "${PROBLEMS[@]+"${PROBLEMS[@]}"}" \
+    | jq -Rn --arg started "$STARTED" --arg finished "$(date -Iseconds)" \
+        --arg snap "$new_id" --arg summary "${summary:-null}" --arg stats "${stats:-null}" '
+      [inputs | select(. != "")] as $p
+      | ($summary | fromjson? // null) as $s
+      | ($stats | fromjson? // null) as $d
+      | {started: $started, finished: $finished,
+         result: (if ($p | length) == 0 then "ok" elif $snap == "" then "failed" else "problems" end),
+         problems: $p,
+         snapshot_id: (if $snap == "" then null else $snap end),
+         files_total: $s.total_files_processed, files_new: $s.files_new,
+         files_changed: $s.files_changed, bytes_added: $s.data_added,
+         diff: (if $d == null then null
+                else {added: $d.added.files, removed: $d.removed.files, changed: $d.changed_files} end)}' \
+    > "$tmp" || { log "Could not write last-run.json."; return 0; }
+  mv -f "$tmp" "$MB_CONFIG/last-run.json" || log "Could not write last-run.json."
+}
+
 finish() {
+  write_last_run
   if [ "${#PROBLEMS[@]}" -eq 0 ]; then
     log "Backup run OK."
     ping_hc "" ""
@@ -98,6 +125,10 @@ else
 fi
 
 # --- 2. Repository --------------------------------------------------------
+if ! mount_ok "$RESTIC_REPOSITORY"; then
+  problem "no Backup folder: $RESTIC_REPOSITORY is not mounted (pick one in the app's Umbrel settings, or set REPO_DIR)"
+  finish
+fi
 if ! repo_id="$(restic_repo_id)"; then
   problem "cannot open restic repo at $RESTIC_REPOSITORY (not mounted? wrong password?)"
   finish

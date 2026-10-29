@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Status</h1>
+<div id="status" data-api="{{ url_for('api_status') }}">
+  <section class="card">
+    <h2>MEGA sync</h2>
+    <p><span class="dot {{ data.sync.level }}" id="sync-dot"></span> <span id="sync-text">{{ data.sync.text }}</span></p>
+    <p class="hint" id="sync-detail">{% if data.who %}Account: {{ data.who }}{% endif %}
+      {% if data.sync.row and data.sync.row.remote %} · MEGA folder: {{ data.sync.row.remote }}{% endif %}</p>
+  </section>
+  <section class="card">
+    <h2>Backups</h2>
+    <p id="engine-text">{{ data.engine.message or '' }}</p>
+    <p id="last-run">Loading…</p>
+    <p id="next-run"></p>
+    <p id="hold" class="flash error" hidden>Pruning of old snapshots is on hold after a large change.
+      Old snapshots are kept until you check it.</p>
+  </section>
+  <section class="card">
+    <h2>Disk</h2>
+    <p id="disk"></p>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='status.js') }}"></script>{% endblock %}

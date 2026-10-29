@@ -14,6 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg bzip2 jq tzdata procps util-linux \
+      python3 python3-flask python3-waitress python3-pexpect \
  && mkdir -p /etc/apt/keyrings \
  && curl -fsSL https://mega.nz/linux/repo/Debian_12/Release.key \
       | gpg --dearmor -o /etc/apt/keyrings/meganz-archive-keyring.gpg \
@@ -45,8 +46,11 @@ ENV HOME=/config \
     PGID=1000 \
     RESTIC_REPOSITORY=/data/repo \
     RESTIC_PASSWORD_FILE=/config/restic-password \
-    RESTIC_CACHE_DIR=/config/restic-cache
+    RESTIC_CACHE_DIR=/config/restic-cache \
+    LISTEN_PORT=8080
 
+COPY share/settings-schema.json /usr/local/share/mega-backup/
+COPY web/ /app/web/
 COPY scripts/ /usr/local/bin/
 
 # /usr/local/bin comes before /usr/bin in PATH. For every MEGAcmd client command and
@@ -54,7 +58,7 @@ COPY scripts/ /usr/local/bin/
 # `docker exec mega-backup mega-login ...` talks to the right server and never leaves
 # root-owned files in /config or the repo.
 RUN set -eu; \
-    chmod 755 /usr/local/bin/*.sh; \
+    chmod 755 /usr/local/bin/*.sh /usr/local/bin/*.py; \
     for f in /usr/bin/mega-* /usr/bin/restic; do \
       name="$(basename "$f")"; \
       [ "$name" = mega-cmd-server ] && continue; \
@@ -62,6 +66,8 @@ RUN set -eu; \
       chmod 755 "/usr/local/bin/$name"; \
     done; \
     ln -s /usr/local/bin/backup.sh /usr/local/bin/backup
+
+EXPOSE 8080
 
 HEALTHCHECK --interval=5m --timeout=30s --start-period=2m --retries=3 \
   CMD ["/usr/local/bin/healthcheck.sh"]

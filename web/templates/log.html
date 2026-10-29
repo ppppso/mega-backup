@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Log</h1>
+<p class="hint">The last {{ lines|length }} lines of the app's log (newest at the bottom).
+MEGAcmd's own, very detailed log is in <code>/config/.megaCmd/megacmdserver.log</code>.</p>
+<pre class="log">{% for l in lines %}{{ l }}
+{% endfor %}</pre>
+{% endblock %}

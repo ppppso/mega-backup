@@ -1,8 +1,6 @@
 #!/bin/bash
-# Docker HEALTHCHECK: healthy = MEGAcmd server running and logged in.
-# `mega-whoami` exits 0 when logged in and 57 when not (verified on MEGAcmd 2.6).
+# Docker HEALTHCHECK: healthy = MEGAcmd server running and the web UI answering.
+# Login and sync state are shown in the web UI instead.
 set -eu
-# Check the server first: a mega-* client started without a server spawns a new one.
 pgrep -x mega-cmd-server >/dev/null || exit 1
-cd /tmp
-exec mega-whoami >/dev/null 2>&1
+exec curl -fsS -m 10 -o /dev/null "http://127.0.0.1:${LISTEN_PORT:-8080}/healthz"
