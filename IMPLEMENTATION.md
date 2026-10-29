@@ -1,392 +1,332 @@
-# mega-backup — implementation brief
+# Backup for MEGA — Umbrel app: implementation plan
 
-You (the implementing agent) are building a small, self-contained project in this repo.
-Read the whole brief before starting. Ask the user before doing anything that needs
-real MEGA credentials, touches the Umbrel device, commits, or pushes.
+Status: **approved (2026-10-29). Phase 1 built and tested offline (2026-10-29); the real-MEGA test through the web UI is pending.**
+
+This turns the working v1 (scripts + `docker compose` over SSH, tested end-to-end
+with a real MEGA account on 2026-10-29) into a native umbrelOS 2.0 app. Everything is
+done from the Umbrel web UI: install, MEGA login, settings, status, restore.
+
+The backup engine stays as it is: MEGAcmd two-way sync into a local folder plus
+nightly restic snapshots, with the existing guards. Its design and the decisions
+behind it are in [`docs/engine-design.md`](docs/engine-design.md). This plan covers
+what we add around it.
+
+---
+
+## 0. Decisions for you to review
+
+These need a yes/no or a choice before building. **R** is my recommendation.
+Decided items are marked ✅ with the date.
+
+| # | Question | Options | R |
+|---|---|---|---|
+| D1 | Where does the backup history (`repo/`) live? | (a) a folder you pick in the app's Umbrel settings, in Home or on an external drive; backups stay off until one is picked · (b) default under Home › Downloads (the only default location Umbrel apps can use today) · (c) inside the app's data (**deleted on uninstall**) | ✅ **(a)** (2026-10-29) |
+| D2 | Where does the MEGA mirror (`current/`) live? | (a) inside the app's data, excluded from Umbrel backups, not visible in Files · (b) a Home folder you pick, so you can browse it in Files (it gets indexed; files written there go up to MEGA) | ✅ **(b)** (2026-10-29): you browse your MEGA files in Files, and files you add there go up to MEGA. Restic snapshots are the safety net. Setup refuses a non-empty folder unless you confirm the merge |
+| D3 | App login in addition to Umbrel's? | (a) yes: a per-install app password, shown on Umbrel's app page · (b) no, rely on Umbrel's login only | ✅ **(a)** (2026-10-29), see §6 |
+| D4 | Allow turning snapshots (restic) off? | (a) yes, with a clear warning that a mirror alone isn't a backup · (b) no | ✅ **(a)**, default on (2026-10-29) |
+| D5 | Public GitHub repositories? Umbrel can only install from a **public** app-store repo and a **public** image. `ppppso/mega-backup` is private today. | (a) make `mega-backup` public, publish the image on `ghcr.io/ppppso/mega-backup`, plus a new public `ppppso/umbrel-app-store` · (b) keep the code private, publish only the image and the store repo | ✅ **(a)**, but only after checking that no commit contains secrets (2026-10-29). Check done on the single commit `1fdd01e` and the working tree: gitleaks v8.28.0 found nothing, a manual search for personal data (emails, home paths, ping URLs, keys) found nothing, the author email is the GitHub no-reply address, and `.env`/`config/`/`data/` were never committed. **Repeat both checks on the full history right before making it public.** |
+| D6 | App name | "Backup for MEGA" (unofficial; avoids implying it's MEGA's own app) · "MEGA Backup" | ✅ **Backup for MEGA** (2026-10-29) |
+| D7 | Keep the plain `docker compose` setup working as well? | yes / no | ✅ **yes** (2026-10-29): Umbrel's guidelines require it, and it's how we test |
+
+---
 
 ## 1. Goal
 
-Keep an **independent backup** of one folder from a MEGA (mega.nz) account on an
-**umbrelOS** device's disk, "just in case something happens to MEGA" (account ban/closure,
-data loss, accidental deletion, corruption/ransomware propagating through MEGA).
+A user with an Umbrel 2.0 device:
 
-- Changes almost always happen on MEGA. Umbrel must reflect them.
-- Nothing on the Umbrel side should normally write to the synced folder.
-- The backup must survive: MEGA account loss, files deleted on MEGA, files overwritten
-  with garbage on MEGA.
+1. adds the community app store and installs **Backup for MEGA**;
+2. opens it and follows a setup page: log in to MEGA (email, password, 2FA), pick
+   the MEGA folder, pick a backup folder, **save the restic password**;
+3. from then on sees a status page (sync healthy? last backup OK? next backup?) and
+   gets alerts when something is wrong;
+4. can change settings, run a backup, see what changed, clear a prune hold and
+   restore files, all from the browser, with no SSH.
 
-## 2. Decisions already made (with the user) — do not revisit without asking
+---
 
-1. **Use the official MEGAcmd client** (`mega-sync`) for the MEGA ↔ Umbrel sync.
-   - Rejected: rclone's native mega backend (unofficial reimplementation, reports of
-     login failures and temporary account blocks, 2FA awkward for unattended runs).
-   - Rejected: MEGAcmd WebDAV + rclone (works, but reports of MEGAcmd WebDAV crashing
-     /hanging on long transfers; more moving parts).
-2. MEGAcmd sync is **two-way** (there is no download-only mode). Accepted because:
-   - deletions that propagate *up* to MEGA land in MEGA's rubbish bin / version history
-     (recoverable), and
-   - the Umbrel side is kept "write-free" by convention.
-3. Because a sync is not a backup, take **nightly restic backups** of the synced folder
-   into a local restic repository on the Umbrel disk (independent of MEGA). This is what
-   protects against deletions/corruption syncing *down*.
-   - Chosen over rsync `--link-dest` hardlink snapshots because restic deduplicates by
-     content (renames/moves and partial changes cost almost nothing), so long retention
-     is cheap; snapshots are read-only; integrity can be verified (`restic check`); and
-     its JSON output gives per-run change counts for the mass-change guard.
-   - Accepted trade-offs: restores need the `restic` command (not plain folders), and
-     the repository password must be kept safe (lose it = lose the backups).
-4. Deliver as a **single Docker container** (docker compose), deployable on umbrelOS.
-   No official MEGAcmd image exists, so build our own from MEGA's official apt repo.
+## 2. Facts about umbrelOS 2.0 apps (researched 2026-10-29)
+
+Sources: `getumbrel/umbrel-apps` (its developer guides in `.agents/skills/`, plus
+existing packages), `getumbrel/umbrel-community-app-store` (template), and the
+umbrelOS 2.0.0 release notes.
+
+- **Package = `umbrel-app.yml` + `docker-compose.yml`** in a folder named after the
+  app ID. A community store is a public git repo with `umbrel-app-store.yml`
+  (`id`, `name`). App IDs must start with the store ID, e.g. `ppppso-mega-backup`.
+- **Images must be prebuilt**, public, **multi-arch (amd64 + arm64)** and pinned as
+  `tag@sha256:<index digest>`. Compose `build:` isn't allowed.
+- **App data** lives in `${APP_DATA_DIR}/data/...` (bind mounts). With
+  `storage: dataRoot: data`, a 2.0 user can move it to another drive. It's included in
+  **Umbrel backups** unless listed in `backupIgnore:`. **Uninstalling deletes it.**
+- **`folderAccess:`** (2.0): the app declares named folders, and the user points each
+  one at a Home folder, an external drive or a network share in the app's settings.
+  Without a default in compose, nothing is mounted until the user picks one. The only
+  proven default is the Downloads folder (`${UMBREL_ROOT}/data/storage/downloads/...`,
+  rewritten to `${UMBREL_ROOT}/home/Downloads/...`).
+- **Web UI via `app_proxy`**: the manifest `port` is the browser port, and
+  `APP_PORT` is our internal port. **Umbrel login protects it by default**, but in 2.0
+  the owner can switch "Require Umbrel login" off per app. In 2.0 no proxy container
+  runs, and the guide says to treat the shared Docker network as untrusted, so other
+  containers can reach our internal port directly.
+- **The app must be usable from the browser**: "Normal setup must not require editing
+  `docker-compose.yml` or `.env` files, SSH, one-off commands, log scraping…".
+  Settings should apply without a container restart.
+- **Per-install secrets**: `APP_PASSWORD` is derived from the device seed and stays the
+  same across restarts and updates. With `deterministicPassword: true` Umbrel shows it
+  on the app's page.
+- **Conventions**: `restart: on-failure`, `init: true` when needed, files owned by
+  1000:1000, no Docker socket, no privileged mode or extra capabilities, a status
+  endpoint, never log secrets.
+- **Widgets** (optional): home-screen cards fed by an internal JSON endpoint that
+  Umbrel fetches without the user's login, so they must expose nothing sensitive.
+- **Testing**: Umbrel publishes a containerized umbrelOS
+  (`ghcr.io/getumbrel/umbrelos:<version>`, run privileged) for local testing, plus
+  `sudo umbreld client apps.*` commands on a device.
+
+---
 
 ## 3. Architecture
 
-```
-MEGA cloud folder  <── MEGAcmd sync (official, 2-way) ──>  /data/current   (Umbrel disk)
-                                                                │
-                                                     nightly `restic backup`
-                                                                ▼
-                                                   /data/repo   (restic repository:
-                                                   deduplicated, encrypted, read-only snapshots)
-```
-
-One container, `mega-backup`, runs:
-- `mega-cmd-server` (the MEGAcmd daemon; holds the login session and the sync), and
-- a small shell scheduler that runs a backup once a day (backup + guard + forget/prune +
-  periodic check) and pings an optional healthcheck URL.
-
-## 4. Repo layout to create
+One container (the "single-service app" shape). Two long-running processes, started
+and watched by the entrypoint: if either exits, the container exits non-zero and
+Umbrel restarts it.
 
 ```
-mega-backup/
-├── IMPLEMENTATION.md      (this file — keep it)
-├── README.md              (user-facing: setup, first login, restore, troubleshooting)
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── .gitignore             (.env, config/, data/)
-├── scripts/
-│   ├── entrypoint.sh      (root: machine-id, perms, drop privileges → main.sh)
-│   ├── main.sh            (start server, wait for login, ensure sync, ensure repo, scheduler loop)
-│   ├── backup.sh          (one backup run + guard + forget/prune + check + healthcheck ping;
-│   │                       runnable manually)
-│   ├── healthcheck.sh     (Docker HEALTHCHECK; added during implementation, §10)
-│   ├── as-user.sh         (run a command as PUID; added during implementation, §10)
-│   └── lib.sh             (shared helpers: log(), ping_hc(), restic env) — optional
-└── tests/
-    ├── backup_test.sh     (offline tests, §6)
-    └── container_test.sh  (whole-container tests on the Docker host; added, §10)
+container (user 1000, after a short root step)
+├── engine   main.sh: guards, MEGAcmd server, sync, scheduler → backup.sh   (existing, adapted)
+└── web      Python + Flask, served by waitress on :8080 (internal)          (new)
+              ├── reads state:  mega-sync / mega-whoami output, restic snapshots,
+              │                 last-run.json, prune-hold, settings.json
+              └── acts:         login, settings, run backup, clear hold, restore
+                                (calls the same scripts and CLI the engine uses)
 ```
 
-Shell: POSIX `sh` or `bash` (bash is fine, it's in the image). Use `set -eu` (and
-`pipefail` in bash). Keep scripts small and readable; comment the non-obvious parts only.
+- **Web stack:** Python 3.11 + Flask + waitress from Debian 12's own packages (no pip,
+  no JavaScript build step). Server-rendered HTML with a little plain JS for polling
+  status. Small, easy to review, and it fits the existing Debian image. Rejected: Go
+  (more code for forms and templates), Node (big runtime, build step).
+- **No database.** State stays in small files in `/config`, as today, plus
+  `settings.json` and `last-run.json`.
+- **The engine reads `settings.json`** instead of environment variables. `main.sh`
+  re-reads it each scheduler cycle, and `backup.sh` at the start of each run, so
+  changes apply without a restart. Environment variables remain as defaults for the
+  plain `docker compose` setup.
 
-## 5. Component specs
+### Volumes
 
-### 5.1 Dockerfile
+| In container | Umbrel package | Plain compose | Notes |
+|---|---|---|---|
+| `/config` | `${APP_DATA_DIR}/data/config` | `./config` | MEGA session, restic password, settings, state. Included in Umbrel backups (on purpose, see §6) |
+| `/data/current` | folderAccess **"MEGA folder"** (D2b), visible in Files | `SYNC_DIR` | Two-way with MEGA. Must not contain the Backup folder (checked at setup) |
+| `/data/repo` | folderAccess **"Backup folder"** (D1a) | `REPO_DIR` | Survives uninstall. Must be a real mount (§5) |
+| `/data/restore` | folderAccess **"Restore folder"** (default: Downloads) | `RESTORE_DIR` | Where restores go, visible in Files |
 
-- Base: `debian:12-slim` (MEGA publishes Debian 12 packages for **amd64 and arm64** —
-  Umbrel may be either, e.g. Umbrel Home = amd64, Raspberry Pi = arm64).
-- Packages: `ca-certificates curl gnupg bzip2 jq tzdata procps util-linux` (+ `megacmd`).
-- MEGA apt repo (flat repo, signed):
-  - key: `https://mega.nz/linux/repo/Debian_12/Release.key`
-  - source line: `deb [signed-by=<key>] https://mega.nz/linux/repo/Debian_12/ ./`
-  - **Gotcha (already hit once):** the `megacmd` package installs its *own* apt source
-    that uses `signed-by=/etc/apt/keyrings/meganz-archive-keyring.gpg`. If your source
-    line uses a different key path, the next `apt-get` fails with
-    `Conflicting values set for option Signed-By`. Fix: dearmor the key to
-    `/etc/apt/keyrings/meganz-archive-keyring.gpg` (mkdir it first) and delete your own
-    `.list` file right after installing megacmd (the package's list remains).
-- **restic:** Debian 12's package is too old (0.14). Install a pinned release binary
-  instead: `ARG RESTIC_VERSION` (a current release, **≥ 0.17**, which stores a summary
-  in each snapshot), download
-  `https://github.com/restic/restic/releases/download/v${V}/restic_${V}_linux_${TARGETARCH}.bz2`
-  plus `SHA256SUMS`, **verify the checksum**, `bunzip2`, install to
-  `/usr/local/bin/restic`. Use buildx's `TARGETARCH` (amd64/arm64) so both arches build.
-- Clean apt lists; purge `gnupg` afterwards if you like.
-- `ENV HOME=/config` so MEGAcmd stores its session in `/config/.megaCmd`.
-- restic env (so `docker exec … restic snapshots` works without flags):
-  `RESTIC_REPOSITORY=/data/repo`, `RESTIC_PASSWORD_FILE=/config/restic-password`,
-  `RESTIC_CACHE_DIR=/config/restic-cache`.
-- Copy `scripts/` to `/usr/local/bin/`, `chmod +x`.
-- `ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]`
-- `HEALTHCHECK`: something cheap that proves the server is up and logged in, e.g.
-  `mega-whoami` exit code (verify it returns non-zero when logged out).
-- Check the megacmd postinst doesn't fail in a container without systemd.
+---
 
-### 5.2 entrypoint.sh (runs as root)
+## 4. Web UI
 
-1. **Persistent machine-id.** A community image reports `mega-sync` breaks without a
-   unique, stable `/etc/machine-id`. If `/config/machine-id` doesn't exist, generate one
-   (e.g. `cat /proc/sys/kernel/random/uuid | tr -d -`). Copy it to `/etc/machine-id`
-   on every start.
-2. Create `/data/current` and `/data/repo` if missing; `chown` `/config`,
-   `/data/current`, `/data/repo` to `PUID:PGID` (defaults 1000:1000 — the `umbrel`
-   user). Only chown the top-level dirs + /config recursively; never recursively chown
-   the data tree on every boot (could be huge) — do it only if ownership is wrong
-   at the top level.
-3. Drop privileges with `setpriv --reuid=$PUID --regid=$PGID --init-groups` (or
-   `--clear-groups`) and `exec main.sh`.
+All pages need the app login (D3). Every action is a POST with a CSRF token.
 
-### 5.3 main.sh (runs as PUID)
+1. **Setup** (shown until everything is configured; each step shows ✅ or what's missing):
+   1. *Folders*: if `/data/current` (MEGA folder) or `/data/repo` (Backup folder)
+      isn't a mounted folder, explain how to pick it in the app's Umbrel settings.
+      Refuse if one is inside the other.
+   2. *MEGA login*: email, password, optional 2FA code. Shows MEGA's error message
+      on failure. The password is never stored or logged (§6).
+   3. *MEGA folder*: browse the account's folders (`mega-ls`) and pick one. A
+      warning explains two-way sync in plain words.
+   4. *Restic password*: generated, shown once with copy and download buttons, and
+      a required "I saved it" checkbox. Viewable later under Settings.
+   5. *Start*: creates the sync and shows download progress (files, size).
+2. **Status** (home page): sync state in plain words ("In sync", "Downloading 1,204
+   files", "Sync issues: 3", "Not logged in"), last backup (time, result, files
+   added/changed/removed), next backup, disk use of mirror and repo, free space, and
+   any warning (prune hold, failing runs, low disk). Buttons: **Back up now**,
+   **View log**.
+3. **Snapshots**: list (time, files, size added). Pick one to browse its folders
+   (`restic ls --json`) and **restore** a file, folder or everything into the Restore
+   folder (into a new sub-folder per restore, never overwriting), or **download** a
+   single file (`restic dump`). **Compare** two snapshots (`restic diff`).
+4. **Prune hold** (only when active): what happened, the change list, and buttons
+   **"It was intended, resume pruning"** or **"Restore from before"** (links to
+   Snapshots).
+5. **Settings** (apply without restart):
+   - Snapshots on/off (D4); backup time; timezone;
+   - keep daily N, keep monthly N, or "keep everything";
+   - mass-change thresholds (% removed, % changed);
+   - weekly check day and % of data read;
+   - alert URL (healthchecks.io-style) with a **Send test alert** button;
+   - MEGA account: show who's logged in, **Log out**;
+   - **Change MEGA folder** (§5: guided, destructive steps confirmed);
+   - show the restic password (asks for the app password again).
+6. **Log**: the last ~500 lines of our own log (not MEGAcmd's very verbose log),
+   filtered so no secrets can appear.
 
-1. `trap` SIGTERM/SIGINT → `mega-quit` (graceful server shutdown), then exit.
-2. Start `mega-cmd-server` in the background; wait until a client command responds
-   (poll with timeout).
-3. **Login:** never take the MEGA password from env vars or files. If not logged in,
-   log clearly, repeatedly (every ~60 s) something like:
-   `Not logged in. Run: docker exec -it mega-backup mega-login <email>` (mention
-   `--auth-code=<2FA code>` for 2FA accounts), and wait. The session persists in
-   `/config/.megaCmd`, so this is a one-time step.
-4. **Ensure the sync exists** between `/data/current` and `$MEGA_REMOTE_PATH`:
-   - If a sync for that pair already exists → do nothing (log its state).
-   - If not: create it **only if `/data/current` is empty** (ignore `.debris`). If it is
-     not empty, refuse, log why, and keep waiting — unless `ALLOW_NONEMPTY_INIT=1`.
-     Reason: avoid an unexpected merge pushing local files up to MEGA on first setup.
-   - Verify `$MEGA_REMOTE_PATH` exists on MEGA first (`mega-ls`); fail loudly if not.
-5. **Ensure the restic repository exists:**
-   - Password: if `/config/restic-password` doesn't exist, generate a long random one
-     (e.g. `head -c 32 /dev/urandom | base64`), `chmod 600`, and log a prominent
-     one-time warning: *copy this password somewhere off the device; without it the
-     backups cannot be read.*
-   - Repo: if `restic cat config` succeeds → fine. Otherwise run `restic init` **only if
-     `/data/repo` is empty and `/config/restic-repo-id` does not exist**. After init,
-     store the repo ID (`restic cat config | jq -r .id`) in `/config/restic-repo-id`.
-     On later starts, if the repo is missing/empty but that file exists, **refuse to
-     init** and fail loudly (the repo volume is probably not mounted; silently starting
-     a new empty repo would hide that).
-   - If the repo ID doesn't match `/config/restic-repo-id` → fail loudly (wrong path).
-6. **Scheduler loop:** once per day at `BACKUP_TIME` (HH:MM, container TZ), run
-   `backup.sh`. Implement as: compute seconds until next run, `sleep` in chunks
-   (e.g. ≤ 300 s, so SIGTERM is handled promptly — run `sleep` in background + `wait`).
-   Optionally `BACKUP_ON_START=1` to run one immediately (handy for testing).
-7. If `mega-cmd-server` dies, exit non-zero so Docker's restart policy restarts the
-   container.
+Optional, later: a home-screen widget ("Last backup: OK, 6 h ago · Sync: In sync").
 
-### 5.4 backup.sh (runs as PUID; also runnable via `docker exec mega-backup backup.sh`)
+---
 
-Hold an exclusive `flock` (e.g. on `/config/backup.lock`) for the whole run, so a manual
-run and the scheduled run never overlap. Tee all output to a temp log for the fail ping.
+## 5. Engine changes
 
-1. Ping `$HEALTHCHECK_URL/start` (if set). Use `curl -fsS -m 10 --retry 3`; never let a
-   ping failure fail the backup.
-2. **Sync health check:** inspect `mega-sync` output for the configured pair. Treat
-   anything other than a healthy running/synced state (disabled, suspended, failed,
-   error column set) as a problem → remember it, keep going (a backup is still
-   harmless and useful), but end with a FAIL ping. **Verify the real output format**
-   with `mega-sync --help` / actual output on MEGAcmd 2.6 (column names such as
-   `RUN_STATE`, `STATUS`, `ERROR`; there may be `--output-cols`). Do not guess.
-   Optionally wait (bounded, e.g. up to 30 min) while the sync reports it is still
-   transferring, so the backup is consistent.
-3. **Empty-source guard:** if `/data/current` is missing or empty (ignoring `.debris`)
-   → do NOT back up, FAIL.
-4. **Back up:**
-   - `restic unlock` first (removes only stale locks left by a crashed run).
-   - `restic backup /data/current --host mega-backup --tag nightly --exclude /data/current/.debris --json`
-   - `--host` must be fixed: the container hostname changes when the container is
-     recreated, and restic uses host + paths to find the parent snapshot and to group
-     snapshots for `forget`. (Also set `hostname: mega-backup` in compose.)
-   - Exclude `.debris` (MEGA's local "removed by sync" folder): restic history already
-     keeps old versions. Document this.
-   - Parse the final `"message_type":"summary"` line with `jq`: `files_new`,
-     `files_changed`, `files_unmodified`, `total_files_processed`.
-5. **Mass-change guard.** Compare with the previous snapshot of this host/path
-   (its file count from `restic snapshots --json` → `.summary.total_files_processed`;
-   verify the field name on the pinned version; fall back to `restic diff <prev> <new>`
-   stats if needed). Let `prev` = previous file count.
-   - removed ≈ `prev − (total_files_processed − files_new)`;
-     trip if `removed / prev × 100 > MAX_DROP_PERCENT` (default 20).
-   - trip if `files_changed / prev × 100 > MAX_CHANGE_PERCENT` (default 20) — this
-     catches files overwritten with garbage (ransomware-style), where the count stays
-     the same.
-   - No previous snapshot (first run) → don't trip.
-   - On trip: the backup is kept, FAIL with a clear message ("possible mass deletion /
-     overwrite on MEGA — pruning is on hold"), and write `/config/prune-hold`
-     containing the date, the counts and the reason.
-6. **Sticky prune hold.** If `/config/prune-hold` exists (from this run or any earlier
-   one): **skip forget/prune**, and FAIL every run with "prune on hold since <date>,
-   see /config/prune-hold". Pruning resumes only when the user deletes the file after
-   checking (`docker exec mega-backup rm /config/prune-hold`). Reason: comparing only
-   with the previous snapshot would let the guard pass the next night, and normal
-   retention would then age out the good snapshots.
-7. **Forget + prune** (only if the backup succeeded and no hold exists):
-   `restic forget --host mega-backup --keep-daily $KEEP_DAILY --keep-monthly $KEEP_MONTHLY --prune`
-   (defaults 90 / 24). restic always keeps the latest snapshot. Support `DRY_RUN=1`
-   (→ `--dry-run`). Log what is removed.
-8. **Integrity check:** once a week (on `CHECK_WEEKDAY`, default Sunday), run
-   `restic check --read-data-subset=$CHECK_READ_PERCENT%` (default 5). A failure is a
-   FAIL ping.
-9. Ping success, or `$HEALTHCHECK_URL/fail` with the last ~50 log lines as POST body.
-10. Log to stdout (visible in `docker logs`) with timestamps.
+Changes to `scripts/` (all behaviour stays covered by tests):
 
-### 5.5 docker-compose.yml
+1. **Settings file**: `lib.sh` gets `load_settings` (`jq` from `/config/settings.json`,
+   falling back to environment variables, then to the defaults). Validated in one
+   place, used by `main.sh` and `backup.sh`.
+2. **`last-run.json`**, written atomically by `backup.sh`: start and end time, result,
+   problems, snapshot ID, counts, bytes added. The web UI reads this instead of
+   parsing logs.
+3. **Repo must be a real mount**: before init or backup, check `/proc/self/mountinfo`
+   for `/data/repo`. If it isn't mounted, the repo would land inside the container
+   and vanish on restart, so refuse and show "choose a Backup folder". Plain
+   compose always mounts it, so this check passes there.
+4. **Wait for setup**: `main.sh` waits (as it now waits for login) until a MEGA
+   folder is set, and creates the sync when the user presses *Start*.
+5. **Snapshots off**: the scheduler skips `restic` and the alert covers only sync
+   health. Existing snapshots are kept, never deleted automatically.
+6. **Change MEGA folder** (web-driven): confirm, stop the sync (`mega-sync -d`),
+   clear `current/` (it's only a mirror; the old files remain on MEGA and in the
+   snapshots), reset the empty-folder guard marker, create the new sync. The
+   mass-change guard would trip on the next backup, since every file looks removed,
+   so the first backup after a folder change is tagged and the guard skips it.
+7. **Logging**: everything we log also goes to `/config/logs/app.log` (rotated,
+   1 MB × 3) for the Log page.
+8. **Remove the "log in over SSH" banner**, replaced by "open the app to log in".
 
-- Service `mega-backup`, `build: .`, `container_name: mega-backup`,
-  `hostname: mega-backup`, `restart: unless-stopped`, `env_file: .env`.
-- Volumes (host paths from `.env`):
-  - `${CONFIG_DIR}:/config`
-  - `${SYNC_DIR}:/data/current`
-  - `${REPO_DIR}:/data/repo`
-  - `${RESTORE_DIR}:/data/restore` (target for `restic restore`)
-- No published ports. Default bridge network is fine.
-- Sensible log rotation (`logging: json-file`, `max-size: 10m`, `max-file: 3`).
-- Consider a memory limit note in README (MEGAcmd and restic can both be RAM-hungry on
-  small devices; restic's memory grows with repo size); don't hard-code a low limit.
+---
 
-### 5.6 .env.example
+## 6. Security
+
+- **The MEGA password goes to MEGAcmd without touching disk, logs or process
+  arguments.** The web process drives MEGAcmd's interactive shell (`mega-cmd`)
+  through a pseudo-terminal and types the password at its `Password:` prompt, which
+  we verified on 2026-10-29. That's the same as the manual login, and it avoids
+  `mega-login email password`, where the password would be visible in the process
+  list. The request handler holds it in memory only for the login call. The 2FA
+  prompt in this path is unverified (§10).
+- **App login (D3a)**: one password, `APP_PASSWORD`, which Umbrel shows on the app's
+  page (`deterministicPassword: true`), giving a signed session cookie (HttpOnly,
+  SameSite=Lax, plus a CSRF token on every form; Strict would log you out when
+  arriving from Umbrel's dashboard). Why both logins: in 2.0 other containers on the Umbrel network
+  can reach our port directly, bypassing Umbrel's login, and the owner can switch
+  that login off. Anyone reaching an unprotected page could control the MEGA account.
+  If two logins feel like too much, D3b is a one-line change, but I don't recommend it.
+- **CSRF token** on every POST; **rate limiting** on the app and MEGA login forms.
+- **Restore paths**: only inside `/data/restore`, into new sub-folders; snapshot paths
+  are validated (no `..`, no absolute paths outside `/data/current`).
+- **Secrets on screen**: the restic password is shown only on request, after
+  re-entering the app password. Never in logs, widget output or the status JSON.
+- **Umbrel backups include `/config`**, so the MEGA session and the restic password
+  end up in your Umbrel backups (USB or NAS). That's useful (the password can't be
+  lost along with the device) but means those backups must be kept private.
+  Alternative: `backupIgnore` the session and keep only the password. Your call;
+  default is to include both.
+- **Container privileges** stay as today: no extra capabilities, devices, Docker
+  socket or host network. The web server binds to `0.0.0.0:8080` inside the container
+  only, with no published host ports (Umbrel routes to it).
+- **Dependencies** come from Debian packages and MEGA's signed repository; restic is
+  pinned and checksum-verified, as today.
+
+---
+
+## 7. Packaging and publishing
 
 ```
-MEGA_REMOTE_PATH=/Backup/SomeFolder      # folder in the MEGA account
-CONFIG_DIR=./config                      # MEGAcmd session, restic password, machine-id (keep private!)
-SYNC_DIR=/home/umbrel/umbrel/home/mega-backup/current
-REPO_DIR=/home/umbrel/umbrel/home/mega-backup/repo
-RESTORE_DIR=/home/umbrel/umbrel/home/mega-backup/restore
-PUID=1000
-PGID=1000
-TZ=UTC                                   # set to the user's timezone
-BACKUP_TIME=03:30
-KEEP_DAILY=90
-KEEP_MONTHLY=24
-MAX_DROP_PERCENT=20
-MAX_CHANGE_PERCENT=20
-CHECK_WEEKDAY=7                          # 1=Mon … 7=Sun
-CHECK_READ_PERCENT=5
-HEALTHCHECK_URL=                         # e.g. https://hc-ping.com/<uuid> (optional)
-BACKUP_ON_START=0
-ALLOW_NONEMPTY_INIT=0
+ppppso/mega-backup            (code; D5)
+├── Dockerfile, scripts/, web/, tests/, docker-compose.yml (plain setup), README.md
+└── .github/workflows/release.yml   tag v* → build amd64+arm64 → push ghcr.io/ppppso/mega-backup:<ver>
+
+ppppso/umbrel-app-store       (public; what you add in Umbrel)
+├── umbrel-app-store.yml       id: ppppso, name: "ppppso"
+└── ppppso-mega-backup/
+    ├── umbrel-app.yml         manifestVersion 2.0 (uses folderAccess + 2.0 HTTPS), storage,
+    │                          folderAccess (MEGA folder, Backup folder, Restore folder), port, deterministicPassword,
+    │                          backupIgnore (data/config/restic-cache/*), icon
+    └── docker-compose.yml     app_proxy (APP_HOST ppppso-mega-backup_server_1, APP_PORT 8080),
+                               server: image ghcr.io/ppppso/mega-backup:<ver>@sha256:…,
+                               restart on-failure, init, stop_grace_period 60s, volumes (§3)
 ```
 
-The Umbrel paths are a best guess (umbrelOS 1.x keeps the Files app data under
-`/home/umbrel/umbrel/home/`). The user must confirm on their device. `SYNC_DIR` and
-`REPO_DIR` may be on different disks (a separate disk for the repo is more resilient).
+- **Port**: one not used by the official store, checked against its 400 apps when
+  publishing (e.g. 2947, currently free).
+- **MEGAcmd version** pinned in the Dockerfile (today it takes whatever MEGA's repo
+  has; 2.6.0 became 2.7.0 between two builds). Updates then happen on purpose,
+  through a new app version.
+- **Versioning**: app version = our version (`1.0.0`, …), shown in the manifest with
+  release notes. The image tag matches it.
+- Publishing steps that need you (D5): create or make public the repositories, allow
+  the GitHub Actions workflow to push the image, and set the package to public.
 
-### 5.7 README.md (for the user, not for agents)
+---
 
-Short and practical:
-1. What it does + the diagram + the "sync is two-way, don't write into `current/`" rule.
-2. Deploy on Umbrel: `ssh umbrel@umbrel.local`, clone/copy repo to e.g.
-   `/home/umbrel/mega-backup`, `cp .env.example .env`, edit, `docker compose up -d --build`.
-   (Portainer from the Umbrel App Store is an alternative; note it may not build images
-   from a compose file — check and document what works.)
-3. First login: `docker exec -it mega-backup mega-login you@example.com`
-   (2FA: `--auth-code=123456`). Then `docker logs -f mega-backup`.
-4. **Save the restic password** (`config/restic-password`) somewhere off the device
-   (password manager). Without it the backups are unreadable.
-5. Check status: `docker exec mega-backup mega-sync`,
-   `docker exec mega-backup restic snapshots`, run a backup now (`backup.sh`).
-6. Restore:
-   - list: `restic snapshots`, browse: `restic ls <id> [path]`, compare: `restic diff <a> <b>`
-   - restore: `restic restore <id> --target /data/restore [--include <path>]`, then copy
-     from `RESTORE_DIR` on the host.
-   - `restic mount` needs FUSE/privileged mode — not supported in this setup.
-   - Restoring without this container: any machine with `restic`, a copy of the repo
-     folder and the password.
-7. Prune hold: what the FAIL message means, how to inspect (`restic diff`), how to clear
-   (`rm /config/prune-hold`).
-8. Security: `config/` contains a session with full access to the MEGA account and the
-   repo password.
-9. Things to check once (see §7).
-10. MEGA side: rubbish bin retention and file versioning settings.
-11. Future options: off-site copy of the repo (`restic copy` to B2/S3/another disk).
+## 8. Testing
 
-## 6. Testing (do this in a local dev container with Docker; no Umbrel device needed)
+| Level | Where | What |
+|---|---|---|
+| Unit | Docker, no account | existing `backup_test.sh` (44) + new: settings load and validation, `last-run.json`, repo-not-mounted refusal, snapshots off, folder-change guard skip |
+| Web | Docker, no account | pytest against the Flask app with MEGAcmd and restic faked: auth required everywhere, CSRF, login never logs or stores the password, restore path checks, settings apply |
+| Container | Docker, no account | existing `container_test.sh` (24) adapted: both processes up, either dying restarts the container, status page reachable, no root-owned files |
+| Real MEGA | this PC, `/mega-backup-test` | the stage-2 checklist again, done through the web UI: login (also with 2FA if you enable it on the test account), folder pick, download, backup, delete on MEGA, mass-delete hold, restore, download a file |
+| Umbrel (local) | containerized umbrelOS 2.0 on this PC | install from our store, folderAccess settings appear and work, open via Umbrel, app password shown, restart keeps state, **uninstall keeps the Backup folder** |
+| Umbrel (device) | your Umbrel, test folder first | the same, plus arm64, memory use, an umbrelOS update later |
 
-Docker is available here. You do **not** have MEGA credentials — do not try to obtain
-or guess any.
+Each phase ends with its tests passing. Shellcheck + a Python linter stay clean.
 
-Without an account, test what you can:
-- Image builds (`docker compose build`); ideally also `docker buildx build --platform
-  linux/arm64` if buildx/qemu is available (skip if not, and say so). Confirm
-  `restic version` runs on each built arch.
-- `mega-cmd-server` starts in the container; logged-out path logs the login hint and
-  the container stays up; SIGTERM stops it within a few seconds.
-- machine-id persistence across container recreation.
-- Repo setup: password generated once; repo initialised on first start; **not**
-  re-initialised when `/data/repo` is emptied but `/config/restic-repo-id` exists;
-  repo-ID mismatch fails.
-- `backup.sh` logic in isolation: make it testable by allowing the sync health check
-  to be skipped (e.g. `SKIP_SYNC_CHECK=1`, test-only, documented as such). Use fake
-  data in temp dirs to test: first backup; unchanged second run adds ~no data
-  (`data_added` ≈ 0); renaming a folder adds ~no data; changed file shows up in
-  `restic diff`; deleted file still restorable from the older snapshot; `.debris`
-  excluded; empty-source guard; drop guard and change guard each create
-  `prune-hold`; hold persists across runs and blocks forget until removed; forget
-  retention with synthetic snapshots (`restic backup --time <date>`, DRY_RUN and real);
-  stale lock is cleared; `flock` prevents overlapping runs.
-- `shellcheck` all scripts if available (install it in a throwaway container if needed).
-- Put these in `tests/backup_test.sh`, runnable inside the container.
+---
 
-With an account (only if the user provides a **throwaway/test** account or does the
-login themselves): end-to-end — login, sync creation, file appears locally, delete on
-MEGA → check local `.debris` behavior, backup, restore.
+## 9. Phases
 
-## 7. Unverified facts — confirm and record results in README
+1. **Foundation**: settings file, `last-run.json`, mount check, logging (§5). Web
+   skeleton with app login, Status page, MEGA login, Setup flow. Plain compose with
+   the web port. *Result: setup without SSH works locally.*
+   ✅ Built 2026-10-29. Tests: `backup_test.sh` 62, `web_test.py` 24 (MEGAcmd faked),
+   `container_test.sh` 42, shellcheck and pyflakes clean. Pending: the same flow with
+   the real MEGA test account (login, folder picker, sync start).
+2. **Packaging**: release workflow, store repo, manifest. Test in local umbrelOS,
+   then on your device with the test folder. *Result: installable from Umbrel.*
+3. **Settings and actions**: Settings page, Back up now, prune-hold page, alert test,
+   change MEGA folder, snapshots on/off.
+4. **Snapshots and restore**: browse, compare, restore, download.
+5. **Polish**: widget, README for Umbrel users, final device test, switch to the
+   real MEGA folder.
 
-- Exact `mega-sync` listing format / states in MEGAcmd 2.6 (needed for §5.4.2).
-- Whether MEGAcmd sync moves locally-removed files into `<sync root>/.debris`
-  (MEGA desktop app does; same SDK, likely but unconfirmed).
-- That `mega-whoami` (or similar) gives a usable exit code for HEALTHCHECK.
-- That `--auth-code` is the right 2FA flag for `mega-login` in 2.6.
-- That the session survives container restarts/recreation with `/config` persisted.
-- Whether a stable `/etc/machine-id` is actually required (keep it anyway; it's cheap).
-- restic: field names in the `backup --json` summary and in `snapshots --json`
-  `.summary` on the pinned version (needed for §5.4.5).
-- restic memory use on the target device with a realistic repo size.
-- MEGA rubbish-bin retention for the user's account type (user-side check).
+I'd stop after each phase for you to try it.
 
-## 8. Out of scope
+---
 
-- Off-site third copy of the repo (mention `restic copy` in README as a future option).
-- Notifications other than the healthchecks.io-style URL.
-- Any change on the user's MEGA account or the Umbrel device. Deployment is done by
-  the user following README.
+## 10. Unverified (to check during the phases)
 
-## 9. Done when
+- MEGAcmd's interactive shell asks for the **2FA code** after the password. Source
+  (2.7.0) says yes ("Enter the code generated by your authentication app: "); not yet
+  seen with a real 2FA account.
+- What the shell prints after a **successful real login** (the code waits for the
+  `<email>:/$ ` prompt, or asks `mega-whoami` every 5 s). Verified with real MEGAcmd
+  so far: the logged-out prompt, and that it redraws the prompt before `Password:`
+  (`MEGA CMD> Password:`).
+- Passwords containing `"` or `\` are refused: MEGAcmd's shell wraps the password in
+  double quotes internally (`login -v email "pw"`), so they would be mangled.
+- `mega-ls -l` output parsing for the folder picker (format taken from the source:
+  FLAGS VERS SIZE DATE NAME); check with real folders, including names with spaces.
+- Whether Umbrel shows apps inside a frame (the CSP has `frame-ancestors 'self'`).
+- What a **folderAccess folder** is on disk in 2.0 with multiple users (owner's
+  Home?), and that **uninstalling leaves it alone** (phase 2, local umbrelOS).
+- Whether Umbrel's **Files indexing** of the Backup folder (thousands of encrypted
+  pack files) costs noticeable CPU on a Pi, and whether a folder can be excluded.
+- Whether `folderAccess` can have a **non-Downloads default** (would make D1 smoother).
+- `deterministicPassword` shows the password on the app's page in 2.0 as documented.
+- Whether Umbrel backups are encrypted (affects the `/config` question in §6).
+- With **several Umbrel users**, whether a folderAccess folder is visible only to the
+  user who picked it (phase 2, local umbrelOS).
+- Files written through the **Files app** (owner, permissions) are picked up by the
+  sync and uploaded; files downloaded from MEGA (mode 600) are readable in Files.
+- Whether **Files indexing** of a large MEGA mirror is acceptable, and whether Umbrel
+  backups can skip that folder (it can be downloaded again from MEGA).
 
-- All files in §4 exist, scripts pass shellcheck, image builds.
-- §6 offline tests pass (`tests/backup_test.sh`) and are described briefly in a README
-  "Development" section.
-- §7 items are either verified or clearly listed as "still to verify on first run".
-- Report back to the user: what was built, what was tested, what remains unverified.
-- Do not commit or push unless the user asks.
+## 11. Out of scope
 
-## 10. Implementation notes (decisions taken while implementing, 2026-10-23)
-
-Taken autonomously while the user was away; listed here for review.
-
-1. **`docker exec` runs as PUID.** The Dockerfile puts a wrapper for every `mega-*`
-   client and for `restic` in `/usr/local/bin` (ahead of `/usr/bin` in PATH) that
-   drops to PUID:PGID via `as-user.sh`; `backup.sh` re-executes itself the same way.
-   Reason: verified that a MEGAcmd client started without a reachable server starts
-   its own server as the calling user, so root `docker exec` calls would have created
-   root-owned state or a second server.
-2. **Empty-folder (mount) guard** in `main.sh`: once the sync exists and `current/` had
-   content (`/config/sync-established`), MEGAcmd is not started while `current/` is
-   empty. Protects MEGA from a missing disk/bind mount looking like "everything deleted".
-3. **Repo setup runs before MEGA login**, so the password banner appears on first
-   start and the repo logic is testable without an account.
-4. **Health check** checks `pgrep mega-cmd-server` before `mega-whoami`, so it never
-   starts a server itself.
-5. **Mass-change guard uses `restic diff`** (removed files, content-changed files)
-   rather than the backup summary, because the summary counts timestamp-only changes
-   as "changed" (verified). Previous file count comes from the previous snapshot's
-   `.summary.total_files_processed`.
-6. **Prune hold file is `/config/prune-hold`**; forget/prune is also skipped when the
-   backup exited non-zero (e.g. exit 3 = some files unreadable).
-7. **Catch-up:** if the newest snapshot is older than 26 h at container start, a backup
-   runs immediately (no catch-up before the first snapshot exists).
-8. **Compose:** `init: true`, `stop_grace_period: 60s`, `hostname: mega-backup`,
-   `image: mega-backup:local`, and `${VAR:?}` so missing paths fail fast.
-9. **`.env.example` has comments on their own lines**: Docker Compose turned
-   `HEALTHCHECK_URL=   # comment` into the value "# comment" (verified).
-10. **restic 0.19.1** pinned (latest release older than two weeks), SHA256-verified.
-11. **MEGAcmd server log** goes to `/config/.megaCmd/megacmdserver.log` (very verbose
-    at DBG level, not useful in `docker logs`).
-12. **Verified facts (§7):** `mega-sync` columns/values (from `--help` and MEGAcmd
-    2.6.0 source: healthy = `RUN_STATE` Running, `ERROR` NO; conflicts show as
-    `Sync Issues (n)`; file column is `FILES`), `mega-whoami` exit 0/57,
-    `--auth-code` flag, `mega-login <email>` prompts for the password, socket at
-    `$HOME/.megaCmd/megacmd.socket`, megacmd postinst works without systemd, restic
-    JSON fields. Session persistence, `.debris` behaviour and memory use still need a
-    real account/device (listed in README).
-13. **arm64:** image builds; both test suites pass under qemu emulation. Not run on
-    real arm64 hardware.
+- Several MEGA folders or accounts in one install (one sync, one repo).
+- Off-site copies of the repo (`restic copy`). Possible later as a setting.
+- Submitting to the official Umbrel App Store. Possible later; the official store
+  has the same rules, so this plan keeps the door open.
+- Automatic conflict resolution: sync issues are shown, with MEGA's description, and
+  you resolve them in MEGA.
