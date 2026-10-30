@@ -5,10 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Backup for MEGA</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{# Loaded before the page renders, so a chosen theme doesn't flash. #}
+<script src="{{ url_for('static', filename='theme.js') }}"></script>
 </head>
 <body>
 <header>
   <span class="brand">Backup for MEGA</span>
+  <div class="header-end">
   {% if session.auth %}
   <nav>
     <a href="{{ url_for('index') }}" {% if page == 'status' %}aria-current="page"{% endif %}>Status</a>
@@ -20,6 +23,8 @@
     </form>
   </nav>
   {% endif %}
+  <button type="button" class="theme" id="theme-toggle" title="Colour theme">Theme: Auto</button>
+  </div>
 </header>
 <main>
   {% for cat, msg in get_flashed_messages(with_categories=true) %}

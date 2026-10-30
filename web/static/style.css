@@ -2,11 +2,22 @@
   --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #5d6675; --line: #dde1e8;
   --accent: #d9272e; --ok: #1f8a4c; --busy: #b7791f; --bad: #c53030;
   --ok-bg: #e7f6ed; --bad-bg: #fdecec; --info-bg: #eaf1fb;
-  color-scheme: light dark;
+  color-scheme: light;
 }
+/* Dark: follows the system unless the theme button chose Light; or chosen with it. */
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #14171c; --card: #1d2229; --text: #e6e9ee; --muted: #9aa3b2; --line: #2e353f;
-          --ok-bg: #16301f; --bad-bg: #3a1c1c; --info-bg: #1b2a3d; }
+  :root:not([data-theme="light"]) {
+    --bg: #14171c; --card: #1d2229; --text: #e6e9ee; --muted: #9aa3b2; --line: #2e353f;
+    --accent: #e5484d; --ok: #3dd68c; --busy: #f5a524; --bad: #ff6369;
+    --ok-bg: #16301f; --bad-bg: #3a1c1c; --info-bg: #1b2a3d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171c; --card: #1d2229; --text: #e6e9ee; --muted: #9aa3b2; --line: #2e353f;
+  --accent: #e5484d; --ok: #3dd68c; --busy: #f5a524; --bad: #ff6369;
+  --ok-bg: #16301f; --bad-bg: #3a1c1c; --info-bg: #1b2a3d;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
@@ -16,6 +27,9 @@ header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; jus
 .brand { font-weight: 700; }
 .brand::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%;
                  background: var(--accent); margin-right: 8px; }
+.header-end { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+button.theme { background: none; color: var(--muted); padding: 2px 8px; border: 1px solid var(--line);
+               border-radius: 999px; font-size: .85rem; }
 nav { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 nav a { color: var(--muted); text-decoration: none; }
 nav a[aria-current] { color: var(--text); font-weight: 600; }
