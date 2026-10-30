@@ -284,6 +284,12 @@ Each phase ends with its tests passing. Shellcheck + a Python linter stay clean.
    2026-10-30 (see §10).
 2. **Packaging**: release workflow, store repo, manifest. Test in local umbrelOS,
    then on your device with the test folder. *Result: installable from Umbrel.*
+   ✅ Local test 2026-10-30 in containerized umbrelOS 2.0.0 (amd64): the store is added
+   by URL, the app installs, the folderAccess folders and TZ appear in the app's
+   settings, the Restore folder defaults to `Downloads/mega-restores`, the app password
+   is shown, and the app survives an umbrelOS restart. The image builds for amd64 and
+   arm64 (arm64 checked under emulation). MEGAcmd is pinned by version and checksum.
+   Still to do: first release, then a test on your device.
 3. **Settings and actions**: Settings page, Back up now, prune-hold page, alert test,
    change MEGA folder, snapshots on/off.
 4. **Snapshots and restore**: browse, compare, restore, download.
@@ -316,6 +322,10 @@ I'd stop after each phase for you to try it.
 - Whether `folderAccess` can have a **non-Downloads default** (would make D1 smoother).
 - `deterministicPassword` shows the password on the app's page in 2.0 as documented.
 - Whether Umbrel backups are encrypted (affects the `/config` question in §6).
+- ✅ Checked in umbrelOS 2.0.0's source and tests: folderAccess paths are in the
+  owner's namespace (`/Home/...`). The owner's Home is private: members get their own
+  Home under `/Users/<name>` and can't list `/Home`. Members see a folder or an app
+  only if the owner shares it. Not yet tried with a real second user.
 - With **several Umbrel users**, whether a folderAccess folder is visible only to the
   user who picked it (phase 2, local umbrelOS).
 - Files written through the **Files app** (owner, permissions) are picked up by the

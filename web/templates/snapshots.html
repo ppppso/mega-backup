@@ -12,11 +12,14 @@
 files are stored only once, so snapshots take little space. Kept: everything from the last
 2 days, then one per day for {{ keep.keep_daily }} days and one per month for
 {{ keep.keep_monthly }} months.</p>
+<p class="hint"><b>Files</b> and <b>Total size</b>: the MEGA folder at that moment.
+<b>Added to backup</b>: how much the Backup folder grew for this snapshot. Any change, even
+a deletion, records the new folder listing, which takes a little space.</p>
 {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
 {% if snaps %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th>When</th><th class="num">Files</th><th class="num">Size</th><th class="num">New data</th><th></th></tr></thead>
+  <thead><tr><th>When</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Added to backup</th><th></th></tr></thead>
   <tbody>
   {% for s in snaps %}
   <tr>

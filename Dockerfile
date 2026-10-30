@@ -1,28 +1,40 @@
 FROM debian:12-slim
 
 ARG RESTIC_VERSION=0.19.1
+# MEGAcmd, pinned. MEGA's repo only keeps the latest version, so when MEGA releases a
+# new one this build fails at the checksum step: update the version and both
+# checksums on purpose (from https://mega.nz/linux/repo/Debian_12/Packages).
+ARG MEGACMD_VERSION=2.7.0-1.1
+ARG MEGACMD_SHA256_AMD64=a7212f86ab75d63fff5ab99e6b2b62c545be76bb8fef9f9b52ed135862612d8d
+ARG MEGACMD_SHA256_ARM64=a6754237ac5ad36733e13b212c9438d75d6c95016a57acb6ac8bd5096e786a76
 # Set automatically by buildx / BuildKit (amd64, arm64).
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# MEGAcmd from MEGA's official apt repo.
-# The megacmd package installs its own apt source that points at
-# /etc/apt/keyrings/meganz-archive-keyring.gpg, so the key must live at exactly that
-# path, and our temporary .list is removed afterwards (otherwise apt fails with
-# "Conflicting values set for option Signed-By").
-RUN apt-get update \
+# MEGAcmd from MEGA's official repo: the pinned .deb, checksum-verified.
+# Only the verified file is installed (no MEGA apt source during the install). The
+# package then adds its own apt source pointing at
+# /etc/apt/keyrings/meganz-archive-keyring.gpg, so the key is kept at that path.
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) sum="$MEGACMD_SHA256_AMD64" ;; \
+      arm64) sum="$MEGACMD_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg bzip2 jq tzdata procps util-linux \
       python3 python3-flask python3-waitress python3-pexpect \
  && mkdir -p /etc/apt/keyrings \
  && curl -fsSL https://mega.nz/linux/repo/Debian_12/Release.key \
       | gpg --dearmor -o /etc/apt/keyrings/meganz-archive-keyring.gpg \
- && echo "deb [signed-by=/etc/apt/keyrings/meganz-archive-keyring.gpg] https://mega.nz/linux/repo/Debian_12/ ./" \
-      > /etc/apt/sources.list.d/mega-tmp.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends megacmd \
- && rm -f /etc/apt/sources.list.d/mega-tmp.list \
+ && deb="megacmd_${MEGACMD_VERSION}_${arch}.deb" \
+ && curl -fsSL -o "/tmp/$deb" "https://mega.nz/linux/repo/Debian_12/${arch}/$deb" \
+ && echo "$sum  /tmp/$deb" | sha256sum -c - \
+ && apt-get install -y --no-install-recommends "/tmp/$deb" \
+ && rm -f "/tmp/$deb" \
  && apt-get purge -y gnupg && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 

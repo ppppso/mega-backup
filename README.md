@@ -305,3 +305,16 @@ the real ones), `lib.sh` (shared helpers, settings loader, mount checks).
 the engine and the web UI both read it. `web/` is the web UI (Flask, served by
 waitress): `app.py` (pages, login, CSRF), `engine.py` (reads state), `megalogin.py`
 (MEGA login through the `mega-cmd` shell), `settings.py`.
+
+### Releasing
+
+Push a tag such as `v1.0.0`. The GitHub Actions workflow
+(`.github/workflows/release.yml`) runs the tests, then builds the image for amd64 and
+arm64 and publishes `ghcr.io/ppppso/mega-backup:1.0.0`. Its summary shows the
+`image: …@sha256:…` line to put in the Umbrel package
+([ppppso/umbrel-app-store](https://github.com/ppppso/umbrel-app-store)).
+
+MEGAcmd is pinned in the Dockerfile by version and checksum. MEGA's repository keeps
+only the latest version, so after a MEGA release the build stops at the checksum
+step: take the new version and both checksums from
+`https://mega.nz/linux/repo/Debian_12/Packages`.

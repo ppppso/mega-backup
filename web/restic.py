@@ -84,7 +84,8 @@ def snapshots():
             "tags": s.get("tags") or [],
             "files": summ.get("total_files_processed"),
             "size": summ.get("total_bytes_processed"),
-            "added": summ.get("data_added"),
+            # Bytes actually written to the backup folder (after compression).
+            "added": summ.get("data_added_packed", summ.get("data_added")),
         })
     out.sort(key=lambda s: s["time"], reverse=True)
     return out
