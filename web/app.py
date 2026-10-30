@@ -229,12 +229,15 @@ def create_app():
         try:
             who = megalogin.login(email, request.form.get("password", ""),
                                   request.form.get("code", ""))
+            print("[web] MEGA login: OK.", flush=True)
             flash(f"Logged in to MEGA as {who}.", "ok")
         except megalogin.NeedsCode as e:
+            print("[web] MEGA login: 2FA code needed.", flush=True)
             session["needs_code"] = True
             session["login_email"] = email
             flash(str(e), "info")
         except megalogin.LoginError as e:
+            print(f"[web] MEGA login failed: {e}", flush=True)
             mega_login_limit.fail()
             session["login_email"] = email
             flash(str(e), "error")
