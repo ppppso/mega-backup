@@ -108,6 +108,8 @@ check "latest snapshot kept"          bash -c "restic snapshots --json --latest 
 check "February snapshots pruned"     bash -c "! grep -q '2026-02' <<< '$remaining'"
 check "2026-03-01/02 pruned"          bash -c "! grep -qE '2026-03-0[12]' <<< '$remaining'"
 check "2026-03-03 and 03-04 kept"     bash -c "grep -q '2026-03-03' <<< '$remaining' && grep -q '2026-03-04' <<< '$remaining'"
+today_n="$(restic snapshots --json | jq --arg d "$(date -u +%F)" '[.[] | select(.time[:10] == $d)] | length')"
+check "same-day snapshots kept (keep-within 2d): $today_n" [ "$today_n" -gt 1 ]
 
 echo "== stale lock from a killed restic is cleared"
 mkfifo "$T/fifo"

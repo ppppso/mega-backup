@@ -3,17 +3,50 @@ import collections
 import datetime
 import hmac
 import os
+import re
 import secrets
 import threading
 import time
 from functools import wraps
+from urllib.parse import quote
 
-from flask import (Flask, abort, flash, jsonify, redirect, render_template, request,
+from flask import (Flask, Response, abort, flash, jsonify, redirect, render_template, request,
                    session, url_for)
 
 import engine
+import jobs
 import megalogin
+import restic
 import settings
+
+
+def human_bytes(n):
+    if n is None:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+
+
+def human_time(t):
+    """datetime -> "2026-10-30 19:32" in the container's time zone (TZ)."""
+    return t.astimezone().strftime("%Y-%m-%d %H:%M") if t else ""
+
+
+def parse_prune_hold(text):
+    """[(reason, before_id, after_id), ...] from the prune-hold file."""
+    out = []
+    for block in text.split("\n\n"):
+        reason = re.search(r"^Reason: (.*)$", block, re.M)
+        ids = re.search(r"Before: snapshot ([0-9a-f]+)\s+After: snapshot ([0-9a-f]+)", block)
+        when = re.search(r"^Prune hold set (.*)$", block, re.M)
+        if reason or ids:
+            out.append({"when": when.group(1) if when else "",
+                        "reason": reason.group(1) if reason else "",
+                        "before": ids.group(1) if ids else None,
+                        "after": ids.group(2) if ids else None})
+    return out
 
 
 def _secret_file(name, nbytes):
@@ -73,6 +106,8 @@ def create_app():
         PERMANENT_SESSION_LIFETIME=datetime.timedelta(days=30),
         MAX_CONTENT_LENGTH=64 * 1024,
     )
+    app.jinja_env.filters["bytes"] = human_bytes
+    app.jinja_env.filters["when"] = human_time
     app_login_limit = RateLimit(5, 15 * 60)
     mega_login_limit = RateLimit(5, 15 * 60)
     mega_login_lock = threading.Lock()
@@ -126,6 +161,7 @@ def create_app():
             "folders": {
                 "done": cur_ok and repo_ok and not overlap,
                 "current": cur_ok, "repo": repo_ok, "overlap": overlap,
+                "restore": engine.mount_ok(restic.restore_dir()),
             },
             "login": {"done": bool(who), "who": who, "server": who is not None},
             "password": {"done": s["restic_password_saved"],
@@ -146,7 +182,8 @@ def create_app():
             "who": who,
             "sync": {"level": level, "text": words, "row": row},
             "last_run": engine.read_json("last-run.json"),
-            "backup_running": engine.backup_running(),
+            "backup_running": engine.backup_running() or (jobs.running() and jobs.current()["kind"] == "backup"),
+            "job": jobs.current(),
             "prune_hold": engine.prune_hold() is not None,
             "disk": {"current": engine.disk(engine.CURRENT), "repo": engine.disk(engine.REPO)},
             "now": int(time.time()),
@@ -284,6 +321,133 @@ def create_app():
     def log_page():
         return render_template("log.html", page="log", lines=engine.log_tail())
 
+    # --- backups and snapshots ------------------------------------------------
+
+    @app.post("/backup-now")
+    @login_required
+    def backup_now():
+        if not setup_state()["complete"]:
+            flash("Finish the setup first.", "error")
+        elif engine.backup_running() or jobs.running():
+            flash("A backup or restore is already running.", "error")
+        elif jobs.start_backup():
+            flash("Backup started. This page updates when it's done.", "ok")
+        return redirect(request.form.get("back") if request.form.get("back") in ("/", "/snapshots")
+                        else url_for("index"))
+
+    @app.get("/snapshots")
+    @login_required
+    def snapshots():
+        try:
+            snaps, error = restic.snapshots(), None
+        except restic.ResticError as e:
+            snaps, error = [], str(e)
+        return render_template("snapshots.html", page="snapshots", snaps=snaps, error=error,
+                               running=engine.backup_running() or jobs.running(),
+                               keep=settings.effective())
+
+    def _snap_or_404(snap_id):
+        try:
+            return restic.find(snap_id)
+        except restic.ResticError as e:
+            abort(404, str(e))
+
+    @app.get("/snapshots/<snap_id>")
+    @login_required
+    def snapshot(snap_id):
+        snap, prev = _snap_or_404(snap_id)
+        try:
+            rel = restic.check_rel(request.args.get("path", ""))
+            entries, truncated = restic.ls(snap, rel)
+            error = None
+        except restic.ResticError as e:
+            rel, entries, truncated, error = "", [], False, str(e)
+        crumbs, acc = [], ""
+        for part in rel.split("/") if rel else []:
+            acc = f"{acc}/{part}" if acc else part
+            crumbs.append((part, acc))
+        return render_template("snapshot.html", page="snapshots", snap=snap, prev=prev, rel=rel,
+                               crumbs=crumbs, entries=entries, truncated=truncated, error=error,
+                               can_restore=engine.mount_ok(restic.restore_dir()),
+                               busy=jobs.running())
+
+    @app.get("/snapshots/<snap_id>/diff")
+    @login_required
+    def snapshot_diff(snap_id):
+        snaps = restic.snapshots()
+        new, prev = restic.find(snap_id, snaps) if snap_id else (None, None)
+        against = request.args.get("against")
+        old = restic.find(against, snaps)[0] if against else prev
+        if old is None:
+            flash("This is the oldest snapshot; there is nothing to compare it with.", "info")
+            return redirect(url_for("snapshot", snap_id=new["short_id"]))
+        try:
+            changes, stats, truncated = restic.diff(old, new)
+            error = None
+        except restic.ResticError as e:
+            changes, stats, truncated, error = [], None, False, str(e)
+        return render_template("diff.html", page="snapshots", old=old, new=new, changes=changes,
+                               stats=stats, truncated=truncated, error=error)
+
+    @app.get("/snapshots/<snap_id>/download")
+    @login_required
+    def snapshot_download(snap_id):
+        snap, _ = _snap_or_404(snap_id)
+        try:
+            rel = restic.check_rel(request.args.get("path", ""))
+            if not rel or restic.node_type(snap, rel) != "file":
+                abort(404, "Only files can be downloaded.")
+        except restic.ResticError as e:
+            abort(404, str(e))
+        name = rel.rsplit("/", 1)[-1]
+        ascii_name = re.sub(r'[^A-Za-z0-9._ -]', "_", name) or "file"
+        return Response(restic.dump(snap, rel), mimetype="application/octet-stream", headers={
+            "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}",
+        })
+
+    @app.post("/snapshots/<snap_id>/restore")
+    @login_required
+    def snapshot_restore(snap_id):
+        snap, _ = _snap_or_404(snap_id)
+        try:
+            rel = restic.check_rel(request.form.get("path", ""))
+        except restic.ResticError as e:
+            abort(400, str(e))
+        back = url_for("snapshot", snap_id=snap["short_id"], path=rel.rsplit("/", 1)[0] if "/" in rel else "")
+        if not engine.mount_ok(restic.restore_dir()):
+            flash("No Restore folder chosen. Pick one in the app's Umbrel settings (or set RESTORE_DIR).", "error")
+            return redirect(back)
+        label = f"Restore of {rel or 'everything'} from {human_time(snap['time'])}"
+        if jobs.start_restore(label, lambda: "Restored into the Restore folder, sub-folder "
+                              + restic.restore(snap, rel) + "."):
+            flash(f"{label} started. The Status page shows when it's done.", "ok")
+        else:
+            flash("A backup or restore is already running. Try again when it's done.", "error")
+        return redirect(back)
+
+    # --- prune hold -------------------------------------------------------------
+
+    @app.get("/prune-hold")
+    @login_required
+    def prune_hold():
+        text = engine.prune_hold()
+        return render_template("prune_hold.html", page="status", text=text,
+                               events=parse_prune_hold(text or ""))
+
+    @app.post("/prune-hold/clear")
+    @login_required
+    def prune_hold_clear():
+        if request.form.get("confirm") != "1":
+            flash("Tick the box to confirm the changes were intended.", "error")
+            return redirect(url_for("prune_hold"))
+        path = engine.cfg("prune-hold")
+        if os.path.exists(path):
+            # Keep the old file for reference.
+            os.replace(path, path + ".cleared-" + time.strftime("%Y%m%d-%H%M%S"))
+            print("[web] Prune hold cleared by the user.", flush=True)
+            flash("Pruning resumed. Old snapshots will be thinned out again after the next backup.", "ok")
+        return redirect(url_for("index"))
+
     @app.get("/api/status")
     @login_required
     def api_status():
@@ -292,5 +456,13 @@ def create_app():
     @app.errorhandler(400)
     def bad_request(e):
         return render_template("error.html", message=e.description), 400
+
+    @app.errorhandler(404)
+    def not_found(e):
+        return render_template("error.html", message=e.description), 404
+
+    @app.errorhandler(restic.ResticError)
+    def restic_error(e):
+        return render_template("error.html", message=str(e)), 502
 
     return app

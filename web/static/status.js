@@ -31,7 +31,17 @@
     $("sync-detail").textContent = detail;
 
     var e = d.engine || {};
-    $("engine-text").textContent = d.backup_running ? "A backup is running now." : (e.message || "");
+    $("engine-text").textContent = d.backup_running ? "A backup is running now…" : (e.message || "");
+    var j = d.job, busy = d.backup_running || (j && !j.finished);
+    $("backup-now").disabled = !!busy;
+    if (j) {
+      $("job").hidden = false;
+      $("job").className = !j.finished ? "flash" : (j.ok ? "flash ok" : "flash error");
+      $("job").textContent = !j.finished ? j.label + " is running…"
+        : j.label + " finished " + ago(new Date(j.finished * 1000).toISOString()) + ": " + j.message;
+    } else {
+      $("job").hidden = true;
+    }
 
     var r = d.last_run;
     if (!r) {

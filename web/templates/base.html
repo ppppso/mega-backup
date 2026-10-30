@@ -15,6 +15,7 @@
   {% if session.auth %}
   <nav>
     <a href="{{ url_for('index') }}" {% if page == 'status' %}aria-current="page"{% endif %}>Status</a>
+    <a href="{{ url_for('snapshots') }}" {% if page == 'snapshots' %}aria-current="page"{% endif %}>Snapshots</a>
     <a href="{{ url_for('setup') }}" {% if page == 'setup' %}aria-current="page"{% endif %}>Setup</a>
     <a href="{{ url_for('log_page') }}" {% if page == 'log' %}aria-current="page"{% endif %}>Log</a>
     <form method="post" action="{{ url_for('logout') }}" class="inline">

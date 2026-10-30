@@ -11,6 +11,8 @@
       {{ 'chosen' if steps.folders.current else 'not chosen yet' }}</li>
     <li>{{ mark(steps.folders.repo) }} <b>Backup folder</b> (the snapshots):
       {{ 'chosen' if steps.folders.repo else 'not chosen yet' }}</li>
+    <li>{{ mark(steps.folders.restore) }} <b>Restore folder</b> (where restored files go; optional):
+      {{ 'chosen' if steps.folders.restore else 'not chosen yet' }}</li>
   </ul>
   {% if steps.folders.overlap %}
   <p class="flash error">These two folders overlap. Pick a Backup folder that is not inside the MEGA folder.</p>

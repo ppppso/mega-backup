@@ -9,12 +9,21 @@
       {% if data.sync.row and data.sync.row.remote %} · MEGA folder: {{ data.sync.row.remote }}{% endif %}</p>
   </section>
   <section class="card">
-    <h2>Backups</h2>
+    <div class="title-row">
+      <h2>Backups</h2>
+      <form method="post" action="{{ url_for('backup_now') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="back" value="/">
+        <button id="backup-now" {% if data.backup_running %}disabled{% endif %}>Back up now</button>
+      </form>
+    </div>
     <p id="engine-text">{{ data.engine.message or '' }}</p>
+    <p id="job" hidden></p>
     <p id="last-run">Loading…</p>
     <p id="next-run"></p>
     <p id="hold" class="flash error" hidden>Pruning of old snapshots is on hold after a large change.
-      Old snapshots are kept until you check it.</p>
+      Old snapshots are kept until you check. <a href="{{ url_for('prune_hold') }}">Check it now</a></p>
+    <p><a href="{{ url_for('snapshots') }}">All snapshots, restore and download →</a></p>
   </section>
   <section class="card">
     <h2>Disk</h2>

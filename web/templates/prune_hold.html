@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Prune hold</h1>
+{% if not text %}
+<p>There is no prune hold. Old snapshots are thinned out normally.</p>
+{% else %}
+<p>A backup saw a large change: many files were removed or changed at once. That can be a
+mistake, or ransomware, or you tidying up. To be safe, <b>old snapshots are no longer deleted</b>
+until you check, so the versions from before the change stay available.</p>
+{% for ev in events %}
+<section class="card">
+  <h2>{{ ev.when }}</h2>
+  <p>{{ ev.reason }}</p>
+  {% if ev.before and ev.after %}
+  <p><a href="{{ url_for('snapshot_diff', snap_id=ev.after, against=ev.before) }}">See what changed</a> ·
+     <a href="{{ url_for('snapshot', snap_id=ev.before) }}">Browse the snapshot from before</a> (to restore files)</p>
+  {% endif %}
+</section>
+{% endfor %}
+<section class="card">
+  <h2>Was it intended?</h2>
+  <form method="post" action="{{ url_for('prune_hold_clear') }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label class="check"><input type="checkbox" name="confirm" value="1" required> Yes, I checked: these changes were intended</label>
+    <button>Resume pruning</button>
+  </form>
+  <p class="hint">If not: restore what you need from the snapshot before the change, and put it back
+  into the MEGA folder. Leave the hold on until you're done.</p>
+</section>
+{% endif %}
+{% endblock %}

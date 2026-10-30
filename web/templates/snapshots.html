@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="title-row">
+  <h1>Snapshots</h1>
+  <form method="post" action="{{ url_for('backup_now') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="back" value="/snapshots">
+    <button {% if running %}disabled title="A backup or restore is running"{% endif %}>Back up now</button>
+  </form>
+</div>
+<p class="hint">Each snapshot is a complete copy of your MEGA folder at that moment. Unchanged
+files are stored only once, so snapshots take little space. Kept: everything from the last
+2 days, then one per day for {{ keep.keep_daily }} days and one per month for
+{{ keep.keep_monthly }} months.</p>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% if snaps %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>When</th><th class="num">Files</th><th class="num">Size</th><th class="num">New data</th><th></th></tr></thead>
+  <tbody>
+  {% for s in snaps %}
+  <tr>
+    <td><a href="{{ url_for('snapshot', snap_id=s.short_id) }}">{{ s.time|when }}</a>
+      {% if loop.first %}<span class="tag">latest</span>{% endif %}</td>
+    <td class="num">{{ s.files if s.files is not none else '?' }}</td>
+    <td class="num">{{ s.size|bytes }}</td>
+    <td class="num">{{ s.added|bytes }}</td>
+    <td class="actions">
+      <a href="{{ url_for('snapshot', snap_id=s.short_id) }}">Browse</a>
+      {% if not loop.last %}· <a href="{{ url_for('snapshot_diff', snap_id=s.short_id) }}">Changes</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% elif not error %}
+<p>No snapshots yet. The first one is made at the next scheduled backup, or press <b>Back up now</b>.</p>
+{% endif %}
+{% endblock %}

@@ -202,8 +202,8 @@ over `.env`.
 | `BACKUP_ON_START` | 0 | 1 = back up on every container start |
 | `ALLOW_NONEMPTY_INIT` | 0 | 1 = allow creating the sync into a non-empty folder |
 
-Retention keeps one snapshot per day (the last one), so if you run `backup.sh` by
-hand several times in a day, the next prune removes the earlier ones from that day.
+Retention keeps every snapshot from the last 2 days, then one per day (the day's
+last) for `KEEP_DAILY` days and one per month for `KEEP_MONTHLY` months.
 
 For `backup.sh` run by hand: `DRY_RUN=1` (show what pruning would delete) and
 `FORCE_CHECK=1` (run the repo check now), e.g.

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('snapshots') }}">Snapshots</a> ›
+  <b>{{ snap.time|when }}</b> <span class="hint">({{ snap.short_id }})</span></p>
+<div class="title-row">
+  <h1 class="path">
+    <a href="{{ url_for('snapshot', snap_id=snap.short_id) }}">MEGA folder</a>{% for name, p in crumbs %} / <a href="{{ url_for('snapshot', snap_id=snap.short_id, path=p) }}">{{ name }}</a>{% endfor %}
+  </h1>
+  {% if prev %}<a href="{{ url_for('snapshot_diff', snap_id=snap.short_id) }}">Changes since {{ prev.time|when }}</a>{% endif %}
+</div>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% if not can_restore %}
+<p class="flash info">No Restore folder is chosen, so restoring is off. Pick one in the app's Umbrel settings
+(or set RESTORE_DIR). Downloading single files works anyway.</p>
+{% endif %}
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Name</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+  <tr>
+    <td>{% if e.type == 'dir' %}<a href="{{ url_for('snapshot', snap_id=snap.short_id, path=e.rel) }}">📁 {{ e.name }}</a>
+        {% else %}{{ e.name }}{% endif %}</td>
+    <td class="num">{{ e.size|bytes if e.type == 'file' else '' }}</td>
+    <td>{{ e.mtime|when }}</td>
+    <td class="actions">
+      {% if e.type == 'file' %}<a href="{{ url_for('snapshot_download', snap_id=snap.short_id, path=e.rel) }}">Download</a>{% endif %}
+      {% if can_restore and e.type in ('file', 'dir') %}
+      <form method="post" action="{{ url_for('snapshot_restore', snap_id=snap.short_id) }}" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="path" value="{{ e.rel }}">
+        <button class="link" {% if busy %}disabled{% endif %}>Restore</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="hint">This folder is empty.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if truncated %}<p class="hint">Only the first {{ entries|length }} entries are shown.</p>{% endif %}
+
+{% if can_restore %}
+<form method="post" action="{{ url_for('snapshot_restore', snap_id=snap.short_id) }}" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="path" value="{{ rel }}">
+  <button {% if busy %}disabled title="A backup or restore is running"{% endif %}>Restore {{ 'everything' if not rel else 'this folder' }}</button>
+</form>
+<p class="hint">Restores go into a new sub-folder of the Restore folder (named after the snapshot
+and the item). Nothing in your MEGA folder is changed or overwritten. To put a file back in MEGA,
+move it from there into the MEGA folder yourself.</p>
+{% endif %}
+{% endblock %}

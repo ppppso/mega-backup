@@ -23,6 +23,10 @@ os.environ.update({
     "MB_CURRENT": os.path.join(T, "current"),
     "RESTIC_REPOSITORY": os.path.join(T, "repo"),
     "RESTIC_PASSWORD_FILE": os.path.join(T, "config", "restic-password"),
+    "RESTIC_CACHE_DIR": os.path.join(T, "cache"),
+    "MB_RESTORE": os.path.join(T, "restore"),
+    "SKIP_SYNC_CHECK": "1",
+    "HEALTHCHECK_URL": "",
     "MB_REQUIRE_MOUNTS": "0",
     "APP_PASSWORD": "app-secret-pw",
     "FAKE_STATE": STATE,
@@ -113,6 +117,7 @@ for name, body in FAKES.items():
 sys.path.insert(0, os.environ.get("WEB_DIR", "/app/web"))
 import app as webapp  # noqa: E402
 import engine  # noqa: E402
+import jobs  # noqa: E402
 import settings  # noqa: E402
 
 CSRF = re.compile(r'name="csrf" value="([^"]+)"')
@@ -120,7 +125,7 @@ CSRF = re.compile(r'name="csrf" value="([^"]+)"')
 
 class Base(unittest.TestCase):
     def setUp(self):
-        for d in ("config", "current", "repo"):
+        for d in ("config", "current", "repo", "restore"):
             shutil.rmtree(os.path.join(T, d), ignore_errors=True)
             os.makedirs(os.path.join(T, d))
         for f in os.listdir(STATE):
@@ -371,6 +376,144 @@ class StatusTest(Base):
         page = self.text("/log")
         self.assertIn("line 799", page)
         self.assertNotIn("line 299\n", page)
+
+
+class SnapshotsTest(Base):
+    """Real restic, real backup.sh (sync check skipped)."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        subprocess.run(["restic", "init", "-q"], check=True, stdout=subprocess.DEVNULL)
+        cur = os.path.join(T, "current")
+        os.makedirs(os.path.join(cur, "sub"))
+        with open(os.path.join(cur, "a.txt"), "w") as f:
+            f.write("apple\n")
+        with open(os.path.join(cur, "sub", "b c.txt"), "w") as f:
+            f.write("banana\n")
+        os.utime(os.path.join(cur, "sub", "b c.txt"), (1600000000, 1600000000))
+        self.login()
+        open(os.path.join(STATE, "logged-in"), "w").write("me@example.com")
+        settings.update({"restic_password_saved": True, "mega_remote_path": "/Photos"})
+
+    def backup(self, ok=True):
+        r = self.post("/backup-now", {"back": "/"}, page="/setup")
+        self.assertEqual(r.status_code, 302)
+        for _ in range(120):
+            if not jobs.running():
+                break
+            import time
+            time.sleep(0.5)
+        j = jobs.current()
+        self.assertEqual(j["ok"], ok, j["message"])
+        return self.text("/snapshots")
+
+    def snap_ids(self):
+        found = re.findall(r'href="/snapshots/([0-9a-f]{8})"', self.text("/snapshots"))
+        return list(dict.fromkeys(found))   # each row links twice; keep order
+
+    def test_backup_browse_download_restore_diff(self):
+        self.assertIn("No snapshots yet", self.text("/snapshots"))
+        page = self.backup()
+        self.assertIn("latest", page)
+        self.assertEqual(json.load(open(os.path.join(T, "config", "last-run.json")))["result"], "ok")
+        sid = self.snap_ids()[0]
+
+        page = self.text(f"/snapshots/{sid}")
+        self.assertIn("a.txt", page)
+        self.assertIn("📁 sub", page)
+        self.assertNotIn("b c.txt", page)            # only direct contents
+        self.assertIn("b c.txt", self.text(f"/snapshots/{sid}?path=sub"))
+
+        r = self.c.get(f"/snapshots/{sid}/download?path=sub/b c.txt")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_data(), b"banana\n")
+        self.assertIn("attachment", r.headers["Content-Disposition"])
+        self.assertIn("b%20c.txt", r.headers["Content-Disposition"])
+
+        def restore(path):
+            before = set(os.listdir(os.path.join(T, "restore")))
+            self.post(f"/snapshots/{sid}/restore", {"path": path}, page=f"/snapshots/{sid}")
+            for _ in range(120):
+                if not jobs.running():
+                    break
+                import time
+                time.sleep(0.5)
+            self.assertTrue(jobs.current()["ok"], jobs.current()["message"])
+            new = set(os.listdir(os.path.join(T, "restore"))) - before
+            self.assertEqual(len(new), 1)
+            return os.path.join(T, "restore", new.pop())
+
+        d = restore("sub/b c.txt")
+        self.assertEqual(open(os.path.join(d, "b c.txt")).read(), "banana\n")
+        self.assertEqual(int(os.path.getmtime(os.path.join(d, "b c.txt"))), 1600000000)
+        d = restore("sub")
+        self.assertEqual(os.listdir(d), ["b c.txt"])
+        d = restore("")
+        self.assertEqual(sorted(os.listdir(d)), ["a.txt", "sub"])
+        self.assertEqual(open(os.path.join(d, "a.txt")).read(), "apple\n")
+        d2 = restore("")
+        self.assertNotEqual(d, d2)                  # never overwrites an earlier restore
+        self.assertEqual(open(os.path.join(T, "current", "a.txt")).read(), "apple\n")  # source untouched
+
+        os.unlink(os.path.join(T, "current", "a.txt"))
+        with open(os.path.join(T, "current", "new.txt"), "w") as f:
+            f.write("new\n")
+        # 1 of 2 files removed = 50%: the mass-change guard trips, as it should.
+        self.backup(ok=False)
+        self.assertIn("finished with problems", self.text("/api/status"))
+        self.assertTrue(os.path.exists(os.path.join(T, "config", "prune-hold")))
+        self.assertIn("1 of 2 files removed", self.text("/prune-hold"))
+        ids = self.snap_ids()
+        self.assertEqual(len(ids), 2)
+        page = self.text(f"/snapshots/{ids[0]}/diff")
+        self.assertIn("a.txt", page)
+        self.assertIn("new.txt", page)
+        self.assertIn("1</span> removed", page.replace("− ", ""))
+        self.assertIn("1</span> added", page.replace("+ ", ""))
+
+    def test_bad_inputs(self):
+        self.backup()
+        sid = self.snap_ids()[0]
+        self.assertEqual(self.c.get("/snapshots/zzzz").status_code, 404)
+        self.assertEqual(self.c.get("/snapshots/deadbeef").status_code, 404)
+        self.assertIn("Invalid path", self.text(f"/snapshots/{sid}?path=../etc"))
+        self.assertEqual(self.c.get(f"/snapshots/{sid}/download?path=sub").status_code, 404)
+        self.assertEqual(self.c.get(f"/snapshots/{sid}/download?path=../../etc/passwd").status_code, 404)
+        self.assertEqual(self.c.get(f"/snapshots/{sid}/download?path=nope.txt").status_code, 404)
+        r = self.post(f"/snapshots/{sid}/restore", {"path": "sub/../../x"}, page=f"/snapshots/{sid}")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(os.listdir(os.path.join(T, "restore")), [])
+        self.assertEqual(self.c.post(f"/snapshots/{sid}/restore", data={"path": "a.txt"}).status_code, 400)
+
+    def test_backup_now_refused_while_running(self):
+        import fcntl
+        fd = os.open(os.path.join(T, "config", "backup.lock"), os.O_CREAT | os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.post("/backup-now", {}, page="/setup")
+            self.assertIn("already running", self.text("/"))
+            self.assertFalse(jobs.running())
+        finally:
+            os.close(fd)
+
+    def test_prune_hold(self):
+        self.assertIn("There is no prune hold", self.text("/prune-hold"))
+        hold = os.path.join(T, "config", "prune-hold")
+        with open(hold, "w") as f:
+            f.write("Prune hold set 2026-10-30 03:31:00\nReason: 30 of 50 files removed (60% > 20%)\n"
+                    "Before: snapshot 1234abcd   After: snapshot 5678ef90\n"
+                    "Inspect: docker exec mega-backup restic diff 1234abcd 5678ef90\n\n")
+        page = self.text("/prune-hold")
+        self.assertIn("30 of 50 files removed", page)
+        self.assertIn("/snapshots/5678ef90/diff?against=1234abcd", page)
+        self.assertIn("/snapshots/1234abcd", page)
+        self.assertTrue(self.c.get("/api/status").get_json()["prune_hold"])
+        self.post("/prune-hold/clear", {}, page="/prune-hold")
+        self.assertTrue(os.path.exists(hold))
+        self.post("/prune-hold/clear", {"confirm": "1"}, page="/prune-hold")
+        self.assertFalse(os.path.exists(hold))
+        self.assertTrue(any(f.startswith("prune-hold.cleared-") for f in os.listdir(os.path.join(T, "config"))))
 
 
 class SettingsTest(Base):

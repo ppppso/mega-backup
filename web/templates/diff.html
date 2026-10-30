@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('snapshots') }}">Snapshots</a> › Changes</p>
+<h1>Changes from {{ old.time|when }} to {{ new.time|when }}</h1>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% if stats %}
+<p><span class="mod add">+ {{ stats.added }}</span> added ·
+   <span class="mod del">− {{ stats.removed }}</span> removed ·
+   <span class="mod chg">~ {{ stats.changed }}</span> changed (files)</p>
+{% endif %}
+<p class="hint">Removed and changed files can be restored from the older snapshot:
+<a href="{{ url_for('snapshot', snap_id=old.short_id) }}">browse {{ old.time|when }}</a>.</p>
+<div class="table-wrap">
+<table>
+  <tbody>
+  {% for c in changes %}
+  {% set cls = {'+': 'add', '-': 'del', 'M': 'chg'}.get(c.mod, 'chg') %}
+  <tr><td class="mod {{ cls }}">{{ {'+': '+', '-': '−', 'M': '~'}.get(c.mod, c.mod) }}</td><td>{{ c.rel }}</td></tr>
+  {% else %}
+  <tr><td class="hint">No changes.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if truncated %}<p class="hint">Only the first {{ changes|length }} changes are shown.</p>{% endif %}
+{% endblock %}

@@ -220,7 +220,9 @@ if [ -e "$PRUNE_HOLD" ]; then
 elif [ "$backup_rc" != 0 ]; then
   log "Skipping forget/prune because the backup was not fully successful."
 else
-  forget_args=(forget --host "$RESTIC_HOST" --path "$MB_CURRENT"
+  # --keep-within 2d: keep every snapshot of the last two days, so manual
+  # "Back up now" runs aren't thinned to one per day right away.
+  forget_args=(forget --host "$RESTIC_HOST" --path "$MB_CURRENT" --keep-within 2d
                --keep-daily "$KEEP_DAILY" --keep-monthly "$KEEP_MONTHLY" --prune)
   [ "$DRY_RUN" = 1 ] && forget_args+=(--dry-run)
   log "restic ${forget_args[*]}"
