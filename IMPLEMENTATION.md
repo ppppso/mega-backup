@@ -157,7 +157,8 @@ All pages need the app login (D3). Every action is a POST with a CSRF token.
    - weekly check day and % of data read;
    - alert URL (healthchecks.io-style) with a **Send test alert** button;
    - MEGA account: show who's logged in, **Log out**;
-   - **Change MEGA folder** (§5: guided, destructive steps confirmed);
+   - ~~Change MEGA folder~~ replaced by the **Folders** page (§5.9): add and remove
+     folder pairs;
    - show the restic password (asks for the app password again).
 6. **Log**: the last ~500 lines of our own log (not MEGAcmd's very verbose log),
    filtered so no secrets can appear.
@@ -184,14 +185,35 @@ Changes to `scripts/` (all behaviour stays covered by tests):
    folder is set, and creates the sync when the user presses *Start*.
 5. **Snapshots off**: the scheduler skips `restic` and the alert covers only sync
    health. Existing snapshots are kept, never deleted automatically.
-6. **Change MEGA folder** (web-driven): confirm, stop the sync (`mega-sync -d`),
-   clear `current/` (it's only a mirror; the old files remain on MEGA and in the
-   snapshots), reset the empty-folder guard marker, create the new sync. The
-   mass-change guard would trip on the next backup, since every file looks removed,
-   so the first backup after a folder change is tagged and the guard skips it.
+6. ~~Change MEGA folder~~: replaced by folder pairs (9). Changing a folder is now
+   "remove the pair, add the new one".
 7. **Logging**: everything we log also goes to `/config/logs/app.log` (rotated,
    1 MB × 3) for the Log page.
 8. **Remove the "log in over SSH" banner**, replaced by "open the app to log in".
+9. **Folder pairs** (done 2026-10-31, requested after 1.0.0). Option A of three
+   (one parent folder; the others were "give the app all of Home" and "fixed
+   folderAccess slots"):
+   - Several MEGA folders, each synced with `<MEGA folder>/<name>` on Umbrel. The list
+     is `/config/pairs.json` (web UI writes it under `pairs.lock`); `scripts/pairs.sh`
+     creates the syncs every minute and removes only those listed under "removed".
+     Nested MEGA folders are refused (MEGA can't sync them); a non-empty local folder
+     needs a merge confirmation.
+   - One restic snapshot per folder (path `<MEGA folder>/<name>`, tag `folder:<name>`),
+     the mass-change guard per folder (only against snapshots taken since the pair was
+     added), retention per folder (`--group-by host,paths`). An empty folder is
+     skipped; the others are still backed up.
+   - Empty-folder guard per folder (`pair-state/<name>.established`), with a
+     "meant to be empty" confirmation on the Status page.
+   - 1.0 installs move automatically: old sync removed, content moved into
+     `<MEGA folder>/<name of the MEGA folder>`, sync created again (MEGA finds the
+     files, nothing is transferred), crash-safe. Old snapshots stay as "Whole MEGA
+     folder (old)".
+   - **Space:** forget + prune run after every backup, also a partial one (before,
+     one unreadable file stopped all clean-up). Snapshots of folders no longer synced
+     expire once their newest is older than the retention period (`--keep-daily`
+     counts days *with* snapshots, so they would otherwise stay forever). Snapshots
+     can be deleted by hand (one, or all of an old folder; `forget.sh`). The Status
+     page shows the Backup folder's size and what the last clean-up freed.
 
 ---
 
@@ -335,7 +357,7 @@ I'd stop after each phase for you to try it.
 
 ## 11. Out of scope
 
-- Several MEGA folders or accounts in one install (one sync, one repo).
+- Several MEGA accounts in one install (one login; several folders are supported, §5.9).
 - Off-site copies of the repo (`restic copy`). Possible later as a setting.
 - Submitting to the official Umbrel App Store. Possible later; the official store
   has the same rules, so this plan keeps the door open.

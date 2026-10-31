@@ -42,18 +42,28 @@ server_running() {
   pgrep -x mega-cmd-server >/dev/null 2>&1
 }
 
-# Prints "RUN_STATE|STATUS|ERROR|REMOTEPATH" for the sync whose local path is
-# $MB_CURRENT, or nothing if there is none. Column names verified against
-# MEGAcmd 2.6 (`mega-sync --help` and src/sync_command.cpp).
+# Prints every sync as "LOCALPATH|RUN_STATE|STATUS|ERROR|REMOTEPATH" (no header).
+# Column names verified against MEGAcmd 2.6+ (`mega-sync --help`).
 # Healthy: RUN_STATE=Running, ERROR=NO. STATUS: Synced | Syncing | Pending | Processing | NONE.
-sync_row() {
+sync_rows() {
   local out
   # Never call a mega-* client without a server: it would start a second one.
   server_running || return 1
   out="$(mega-sync --col-separator='|' --output-cols=LOCALPATH,RUN_STATE,STATUS,ERROR,REMOTEPATH 2>/dev/null)" || return 1
-  printf '%s\n' "$out" | awk -F'|' -v p="$MB_CURRENT" '
-    { for (i = 1; i <= NF; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i) }
-    $1 == p || $1 == p "/" { print $2 "|" $3 "|" $4 "|" $5; exit }'
+  printf '%s\n' "$out" | awk -F'|' '
+    NF >= 5 && $1 !~ /^[ \t]*LOCALPATH[ \t]*$/ {
+      for (i = 1; i <= NF; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i)
+      if ($1 != "/") sub(/\/+$/, "", $1)
+      print $1 "|" $2 "|" $3 "|" $4 "|" $5 }'
+}
+
+# sync_row [localpath]: "RUN_STATE|STATUS|ERROR|REMOTEPATH" of the sync for that
+# local path (default $MB_CURRENT), or nothing if there is none.
+sync_row() {
+  local rows
+  rows="$(sync_rows)" || return 1
+  printf '%s\n' "$rows" | awk -F'|' -v p="$(strip_slash "${1:-$MB_CURRENT}")" '
+    $1 == p { print $2 "|" $3 "|" $4 "|" $5; exit }'
 }
 
 # "/a/b/" -> "/a/b"
@@ -178,4 +188,45 @@ set_state() {
 SYNC_CREATED="$MB_CONFIG/sync-created"
 sync_was_created() {
   [ -e "$SYNC_CREATED" ] || [ -e "$SYNC_MARKER" ]
+}
+
+# ---------------------------------------------------------------------------
+# Folder pairs. Each pair syncs one MEGA folder with a sub-folder of the MEGA folder
+# ($MB_CURRENT/<name>), and gets its own snapshots (restic path = that sub-folder).
+# The list is /config/pairs.json, written by the web UI (and once by the migration
+# from the single-folder setup):
+#   {"pairs":   [{"name": "Photos", "remote": "/Photos", "merge": false, "added": "<iso>"}],
+#    "removed": [{"name": "Old",    "remote": "/Old",    "removed": "<iso>"}]}
+# The engine removes the sync of a pair listed under "removed". A sync that is in
+# neither list is left alone, so a broken or missing file never removes a sync.
+PAIRS_FILE="$MB_CONFIG/pairs.json"
+PAIRS_LOCK="$MB_CONFIG/pairs.lock"
+PAIR_STATE="$MB_CONFIG/pair-state"
+# Same rule as NAME_RE in web/pairs.py.
+PAIR_NAME_RE='^[A-Za-z0-9_][A-Za-z0-9 _.()-]{0,59}$'
+
+pair_dir() { printf '%s/%s' "$MB_CURRENT" "$1"; }
+
+# pairs_active: one "name<TAB>remote<TAB>merge(1/0)<TAB>added" line per valid pair.
+# Fails (prints nothing) if pairs.json exists but cannot be read.
+pairs_active() {
+  [ -e "$PAIRS_FILE" ] || return 0
+  jq -er --arg re "$PAIR_NAME_RE" '
+    if type == "object" and ((.pairs // []) | type) == "array" then . else error("bad") end
+    | (.pairs // [])[]
+    | select((.name | type) == "string" and (.name | test($re)) and (.name | test(" $") | not)
+             and (.remote | type) == "string" and (.remote | test("^/")) and (.remote | explode | all(. >= 32)))
+    | [.name, .remote, (if .merge == true then "1" else "0" end), (.added // "")] | @tsv' \
+    "$PAIRS_FILE" 2>/dev/null || [ "$(jq -r '(.pairs // []) | length' "$PAIRS_FILE" 2>/dev/null)" = 0 ]
+}
+
+# pairs_removed: names of removed pairs, one per line.
+pairs_removed() {
+  [ -e "$PAIRS_FILE" ] || return 0
+  jq -r '(.removed // [])[]? | .name | strings' "$PAIRS_FILE" 2>/dev/null
+}
+
+# Run a command while holding the pairs.json lock (shared with the web UI).
+with_pairs_lock() {
+  ( flock -x 9 && "$@" ) 9>"$PAIRS_LOCK"
 }

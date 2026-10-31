@@ -133,8 +133,8 @@ def whoami():
     return cached("whoami", 5, get)
 
 
-def sync_row():
-    """The sync for CURRENT as a dict, {} if none, None if MEGAcmd isn't running."""
+def sync_rows():
+    """All syncs as {local path: row dict}, None if MEGAcmd isn't running."""
     def get():
         r = mega("mega-sync", "--col-separator=|",
                  "--output-cols=LOCALPATH,RUN_STATE,STATUS,ERROR,REMOTEPATH")
@@ -143,13 +143,59 @@ def sync_row():
         rc, out = r
         if rc != 0:
             return None
+        rows = {}
         for line in out.splitlines():
             cols = [c.strip() for c in line.split("|")]
-            if len(cols) >= 5 and cols[0].rstrip("/") == CURRENT.rstrip("/"):
-                return {"run_state": cols[1], "status": cols[2], "error": cols[3],
-                        "remote": cols[4]}
-        return {}
+            if len(cols) >= 5 and cols[0] != "LOCALPATH":
+                rows[cols[0].rstrip("/") or "/"] = {
+                    "run_state": cols[1], "status": cols[2], "error": cols[3], "remote": cols[4]}
+        return rows
     return cached("sync", 5, get)
+
+
+def sync_row(path=None):
+    """The sync for a local path (default CURRENT): dict, {} if none, None if unknown."""
+    rows = sync_rows()
+    if rows is None:
+        return None
+    return rows.get((path or CURRENT).rstrip("/"), {})
+
+
+def pair_dir(name):
+    return os.path.join(CURRENT, name)
+
+
+def pairs_problems():
+    """{pair name: problem} from the engine's last check of the syncs."""
+    data = read_json("pairs-status.json") or {}
+    return data.get("problems") or {}
+
+
+def guard_empty():
+    """Folders that the start-up guard holds back: [(name, marker file)]. Name "" is
+    the whole MEGA folder (single-folder setup)."""
+    out = []
+    if os.path.exists(cfg("sync-established")) and dir_is_empty(CURRENT):
+        out.append(("", cfg("sync-established")))
+    state = cfg("pair-state")
+    try:
+        names = sorted(f[:-len(".established")] for f in os.listdir(state) if f.endswith(".established"))
+    except OSError:
+        names = []
+    for name in names:
+        if dir_is_empty(pair_dir(name)):
+            out.append((name, os.path.join(state, name + ".established")))
+    return out
+
+
+def other_items(names):
+    """Entries in the MEGA folder that belong to no folder pair (not synced)."""
+    try:
+        entries = os.listdir(CURRENT)
+    except OSError:
+        return []
+    skip = set(names) | {".debris", ".mb-migrating"}
+    return sorted(e for e in entries if e not in skip)
 
 
 # ls -l line: FLAGS VERS SIZE DATE NAME (format from MEGAcmd's dumpNodeSummary).

@@ -8,35 +8,71 @@
     <button {% if running %}disabled title="A backup or restore is running"{% endif %}>Back up now</button>
   </form>
 </div>
-<p class="hint">Each snapshot is a complete copy of your MEGA folder at that moment. Unchanged
+<p class="hint">Each snapshot is a complete copy of one folder at that moment. Unchanged
 files are stored only once, so snapshots take little space. Kept: everything from the last
 2 days, then one per day for {{ keep.keep_daily }} days and one per month for
-{{ keep.keep_monthly }} months.</p>
-<p class="hint"><b>Files</b> and <b>Total size</b>: the MEGA folder at that moment.
-<b>Added to backup</b>: how much the Backup folder grew for this snapshot. Any change, even
-a deletion, records the new folder listing, which takes a little space.</p>
+{{ keep.keep_monthly }} months. After each backup, old snapshots are removed and the space
+they alone used is freed.{% if repo_bytes is not none %} The Backup folder uses {{ repo_bytes|bytes }}{% if freed %}; the last clean-up freed {{ freed|bytes }}{% endif %}.{% endif %}</p>
 {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
-{% if snaps %}
+
+{% if groups|length > 1 %}
+<ul class="tabs">
+  {% for g in groups %}
+  <li><a href="{{ url_for('snapshots', folder=g.path) }}" class="{{ '' if g.active else 'old' }}"
+         {% if g.path == group.path %}aria-current="page"{% endif %}>{{ g.label }}{% if not g.active and g.path != legacy_path %} (not synced){% endif %}</a></li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if group %}
+<h2>{{ group.label }}{% if group.remote %} <span class="hint">↔ MEGA {{ group.remote }}</span>{% endif %}</h2>
+{% if not group.active %}
+<p class="flash info">This folder is no longer synced. Its snapshots are deleted automatically on
+{{ group.expires|when }} (when the newest one is older than the retention period), or now:</p>
+<details class="danger"><summary>Delete all {{ group.snaps|length }} snapshot(s) of this folder now</summary>
+  <form method="post" action="{{ url_for('snapshots_delete_folder') }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="path" value="{{ group.path }}">
+    <label class="check"><input type="checkbox" name="confirm" value="1" required> Delete them for good and free the space</label>
+    <button {% if running %}disabled{% endif %}>Delete snapshots</button>
+  </form>
+</details>
+{% endif %}
+{% if hold %}<p class="flash error">Nothing is removed while the prune hold is on. <a href="{{ url_for('prune_hold') }}">Check it</a></p>{% endif %}
+<p class="hint"><b>Files</b> and <b>Total size</b>: the folder at that moment.
+<b>Added to backup</b>: how much the Backup folder grew for this snapshot. Any change, even
+a deletion, records the new folder listing, which takes a little space.
+<b>Kept until</b>: an estimate, if a backup runs every night from now on, and why the
+snapshot is kept (last 2 days, daily, monthly). "+": kept longer if it stays the
+last snapshot of this month. "(oldest)": the folder's first snapshot, kept while there
+is less history than the retention covers.</p>
+{% if group.snaps %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th>When</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Added to backup</th><th></th></tr></thead>
+  <thead><tr><th>When <span class="hint">(open to browse)</span></th><th class="num wide">Files</th><th class="num wide">Total size</th><th class="num">Added to backup</th><th>Kept until</th></tr></thead>
   <tbody>
-  {% for s in snaps %}
+  {% for s in group.snaps %}
   <tr>
-    <td><a href="{{ url_for('snapshot', snap_id=s.short_id) }}">{{ s.time|when }}</a>
-      {% if loop.first %}<span class="tag">latest</span>{% endif %}</td>
-    <td class="num">{{ s.files if s.files is not none else '?' }}</td>
-    <td class="num">{{ s.size|bytes }}</td>
+    <td class="when"><a href="{{ url_for('snapshot', snap_id=s.short_id) }}">{{ s.time|when }}</a>
+      {% if loop.first %}<span class="tag">latest</span>{% endif %}
+      {% if not loop.last %}<br><a class="hint" href="{{ url_for('snapshot_diff', snap_id=s.short_id) }}">changes</a>{% endif %}</td>
+    <td class="num wide">{{ s.files if s.files is not none else '?' }}</td>
+    <td class="num wide">{{ s.size|bytes }}</td>
     <td class="num">{{ s.added|bytes }}</td>
-    <td class="actions">
-      <a href="{{ url_for('snapshot', snap_id=s.short_id) }}">Browse</a>
-      {% if not loop.last %}· <a href="{{ url_for('snapshot_diff', snap_id=s.short_id) }}">Changes</a>{% endif %}
+    <td class="kept">{% set k = s.kept %}
+      {% if k.remove %}<span class="hint">removed at the next clean-up</span>
+      {% elif k.until %}{% if k.kept_as|select('in', ['monthly', 'monthly (oldest)'])|list and k.until.day == 1 %}~{{ k.until|month }}{% else %}~{{ k.until|day }}{% endif %}{% if k.maybe_longer %}+{% endif %}
+        <br><span class="hint">{{ k.kept_as|join(', ') }}</span>
+      {% else %}<span class="hint">?</span>{% endif %}
     </td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
+{% else %}
+<p>No snapshots of this folder yet. The first one is made at the next scheduled backup, or press <b>Back up now</b>.</p>
+{% endif %}
 {% elif not error %}
 <p>No snapshots yet. The first one is made at the next scheduled backup, or press <b>Back up now</b>.</p>
 {% endif %}

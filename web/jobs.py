@@ -58,3 +58,19 @@ def start_backup():
 
 def start_restore(label, fn):
     return _start("restore", label, fn)
+
+
+def start_forget(label, args):
+    """Delete snapshots (forget.sh) and free the space."""
+    def run():
+        p = subprocess.run(["/usr/local/bin/forget.sh", *args], cwd="/tmp",
+                           capture_output=True, text=True, errors="replace")
+        print(p.stdout + p.stderr, end="", flush=True)   # into the app log
+        if p.returncode == 75:
+            raise RuntimeError("A backup is running. Try again when it's done.")
+        if p.returncode != 0:
+            raise RuntimeError("Deleting failed. See the log.")
+        freed = next((int(line.split()[1]) for line in p.stdout.splitlines()[::-1]
+                      if line.startswith("freed ")), None)
+        return "Deleted." + (f" {freed / 1e6:.1f} MB freed." if freed is not None else "")
+    return _start("forget", label, run)

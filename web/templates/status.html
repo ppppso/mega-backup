@@ -2,11 +2,30 @@
 {% block body %}
 <h1>Status</h1>
 <div id="status" data-api="{{ url_for('api_status') }}">
+  {% for name in data.guard %}
+  <section class="card">
+    <h2>{{ "'" ~ name ~ "'" if name else 'The MEGA folder' }} is empty</h2>
+    <p class="flash error">Syncing is stopped: this folder had files before and is now empty or missing.
+    Usually a disk or folder is missing; check the app's folders in Umbrel, then restart the app.</p>
+    <form method="post" action="{{ url_for('guard_continue') }}" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="name" value="{{ name }}">
+      <label class="check"><input type="checkbox" name="confirm" value="1" required> It is meant to be empty.
+        Delete its files on MEGA too (they go to MEGA's Rubbish bin).</label>
+      <button>Continue syncing</button>
+    </form>
+  </section>
+  {% endfor %}
   <section class="card">
     <h2>MEGA sync</h2>
     <p><span class="dot {{ data.sync.level }}" id="sync-dot"></span> <span id="sync-text">{{ data.sync.text }}</span></p>
-    <p class="hint" id="sync-detail">{% if data.who %}Account: {{ data.who }}{% endif %}
-      {% if data.sync.row and data.sync.row.remote %} · MEGA folder: {{ data.sync.row.remote }}{% endif %}</p>
+    <ul class="plain" id="folders">
+      {% for f in data.folders %}
+      <li><span class="dot {{ f.level }}"></span> <b>{{ f.name }}</b> <span class="hint">↔ MEGA {{ f.remote }}: {{ f.text }}</span></li>
+      {% endfor %}
+    </ul>
+    <p class="hint"><span id="sync-detail">{% if data.who %}Account: {{ data.who }}{% endif %}</span>
+      · <a href="{{ url_for('folders_page') }}">Folders</a></p>
   </section>
   <section class="card">
     <div class="title-row">
@@ -23,6 +42,7 @@
     <p id="next-run"></p>
     <p id="hold" class="flash error" hidden>Pruning of old snapshots is on hold after a large change.
       Old snapshots are kept until you check. <a href="{{ url_for('prune_hold') }}">Check it now</a></p>
+    <p id="space" class="hint"></p>
     <p><a href="{{ url_for('snapshots') }}">All snapshots, restore and download →</a></p>
   </section>
   <section class="card">

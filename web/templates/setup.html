@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pair_form.html" import pair_form %}
 {% macro mark(done) %}<span class="mark {{ 'done' if done else 'todo' }}">{{ '✓' if done else '•' }}</span>{% endmacro %}
 {% block body %}
 <h1>Setup</h1>
@@ -67,36 +68,18 @@
 </section>
 
 <section class="card">
-  <h2>{{ mark(steps.folder.done) }} 4. What to back up</h2>
+  <h2>{{ mark(steps.folder.done) }} 4. What to sync</h2>
   {% if steps.folder.done %}
-  <p>MEGA folder: <b>{{ steps.folder.path }}</b></p>
+  <p>{% for p in steps.folder.pairs %}<b>{{ p.remote }}</b> → folder '{{ p.name }}'{% if not loop.last %}, {% endif %}{% else %}MEGA folder: <b>{{ steps.folder.legacy }}</b>{% endfor %}.
+    Add or remove folders on the <a href="{{ url_for('folders_page') }}">Folders</a> page.</p>
   {% elif not (steps.folders.done and steps.login.done and steps.password.done) %}
   <p>Finish the steps above first.</p>
   {% else %}
-  <p>Pick the folder in your MEGA account to keep in sync. Changes go both ways: files you add, change
-  or delete in the local folder (for example in Umbrel's Files) also change on MEGA, and the other way
-  round. The nightly snapshots let you get older versions back.</p>
-  <p class="path">Current: <b>{{ browse }}</b>
-    {% if browse != '/' %} · <a href="{{ url_for('setup', path=parent) }}">up one level</a>{% endif %}</p>
-  {% if folder_error %}<p class="flash error">{{ folder_error }}</p>{% endif %}
-  <ul class="folders">
-    {% for f in folders %}
-    {% set p = (browse.rstrip('/') ~ '/' ~ f) %}
-    <li><a href="{{ url_for('setup', path=p) }}">📁 {{ f }}</a></li>
-    {% else %}
-    <li class="hint">No sub-folders here.</li>
-    {% endfor %}
-  </ul>
-  <form method="post" action="{{ url_for('start') }}" class="stack">
-    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-    <input type="hidden" name="path" value="{{ browse }}">
-    {% if not steps.folder.local_empty %}
-    <p class="flash error">The local MEGA folder already has files. They will be <b>uploaded to MEGA</b>
-    and merged with what is there.</p>
-    <label class="check"><input type="checkbox" name="merge" value="1" required> Yes, merge them into MEGA</label>
-    {% endif %}
-    <button>Back up {{ 'the whole account' if browse == '/' else browse }}</button>
-  </form>
+  <p>Pick a folder in your MEGA account to keep in sync. It is copied into a folder of the same name
+  inside the app's MEGA folder on Umbrel. Changes go both ways: files you add, change or delete there
+  (for example in Umbrel's Files) also change on MEGA, and the other way round. The nightly snapshots
+  let you get older versions back. You can add more folders later.</p>
+  {{ pair_form(browse, parent, folders, folder_error, suggest, browse_view, 'setup') }}
   {% endif %}
 </section>
 {% endblock %}

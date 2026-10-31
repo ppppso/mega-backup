@@ -66,7 +66,8 @@ check "password file is private"       [ "$(docker exec "$NAME" stat -c %a /conf
 mid1="$(docker exec "$NAME" cat /etc/machine-id)"
 
 echo "== manual backup via docker exec (as root) keeps ownership"
-echo hello > "$T/current/a.txt"
+mkdir -p "$T/current/Test"; echo hello > "$T/current/Test/a.txt"
+echo '{"pairs": [{"name": "Test", "remote": "/Test"}]}' > "$T/config/pairs.json"
 docker exec -e SKIP_SYNC_CHECK=1 "$NAME" backup.sh >/dev/null 2>&1; rc=$?
 check "manual backup succeeds (rc=$rc)" [ "$rc" = 0 ]
 check "nothing root-owned in repo"     [ -z "$(docker exec "$NAME" find /data/repo ! -uid "$(id -u)")" ]
@@ -101,15 +102,15 @@ check "MEGAcmd still starts"           wait_log 'Started mega-cmd-server'
 
 echo "== empty-folder guard"
 docker rm -f "$NAME" >/dev/null
-rm -f "$T/current/a.txt"
-date > "$T/config/sync-established"
+rm -f "$T/current/Test/a.txt"
+mkdir -p "$T/config/pair-state"; date > "$T/config/pair-state/Test.established"
 start
-check "refuses to start MEGAcmd"       wait_log 'REFUSING TO START MEGAcmd'
+check "refuses to start MEGAcmd"       wait_log 'REFUSING TO START MEGAcmd: These folders are empty.*"Test"'
 sleep 2
 check "no MEGAcmd server running"      [ "$(servers)" = 0 ]
-echo back > "$T/current/a.txt"
-docker restart "$NAME" >/dev/null
-check "starts once folder has content" wait_log 'Started mega-cmd-server'
+check "  ...engine status says so"     [ "$(state)" = guard-refusing ]
+echo back > "$T/current/Test/a.txt"
+check "starts once folder has content (no restart)" wait_log 'Started mega-cmd-server' 30
 
 echo "== folder mount checks"
 check "overlap: separate folders"      docker exec "$NAME" bash -c '. /usr/local/bin/lib.sh; ! mounts_overlap /data/current /data/repo'
@@ -129,7 +130,7 @@ docker rm -f "$NAME" >/dev/null
 
 MOUNTS=(-v "$T/config:/config" -v "$T/repo:/data/repo")
 start
-check "no MEGA folder after a sync: refuses MEGAcmd" wait_log 'REFUSING TO START MEGAcmd: /data/current is not mounted'
+check "no MEGA folder after a sync: refuses MEGAcmd" wait_log 'REFUSING TO START MEGAcmd: The MEGA folder is not available'
 check "  ...engine status says so"     [ "$(state)" = folder-missing ]
 check "  ...web UI still up"           [ "$(web /healthz)" = 200 ]
 check "  ...no MEGAcmd server"         [ "$(servers)" = 0 ]

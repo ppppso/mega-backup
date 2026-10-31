@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_pair_form.html" import pair_form %}
+{% block body %}
+<h1>Folders</h1>
+<p class="hint">Each MEGA folder below is synced both ways with a folder of the same name inside
+the app's MEGA folder on Umbrel, and backed up every night with its own snapshots.</p>
+
+<section class="card">
+  <h2>Synced folders</h2>
+  <ul class="pairs">
+  {% for p in pairs %}
+    <li>
+      <div class="title-row">
+        <span><span class="dot {{ p.level }}"></span> <b>{{ p.name }}</b>
+          <span class="hint">↔ MEGA {{ p.remote }}</span></span>
+        <a href="{{ url_for('snapshots', folder=p.path) }}">Snapshots</a>
+      </div>
+      <p class="hint">{{ p.text }}</p>
+      {% if p.stopped %}
+      <form method="post" action="{{ url_for('folder_resume') }}" class="stack">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="name" value="{{ p.name }}">
+        {% if p.in_rubbish %}<p class="flash info">The MEGA folder is in MEGA's Rubbish bin. Restore it there
+        (in the MEGA app or mega.nz), then Resume becomes available.</p>{% endif %}
+        <button {% if p.resuming or p.in_rubbish %}disabled{% endif %}>{{ 'Resuming… (within a minute)' if p.resuming else 'Resume sync' }}</button>
+      </form>
+      {% endif %}
+      {% if p.needs_merge %}
+      <form method="post" action="{{ url_for('folder_merge') }}" class="stack">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="name" value="{{ p.name }}">
+        <label class="check"><input type="checkbox" name="confirm" value="1" required> Upload the files already in
+          '{{ p.name }}' to MEGA and merge them with what is there</label>
+        <button>Merge and start syncing</button>
+      </form>
+      {% endif %}
+      <details class="danger"><summary>Stop syncing this folder</summary>
+        <form method="post" action="{{ url_for('folder_remove') }}" class="stack">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="name" value="{{ p.name }}">
+          <p class="hint">Nothing is deleted: the files stay on MEGA and in the folder here, but changes
+          are no longer synced or backed up. Its snapshots are kept until they expire, or until you
+          delete them on the Snapshots page.</p>
+          <label class="check"><input type="checkbox" name="confirm" value="1" required> Stop syncing '{{ p.name }}'</label>
+          <button>Stop syncing</button>
+        </form>
+      </details>
+    </li>
+  {% else %}
+    <li class="hint">No folders yet. Add one below.</li>
+  {% endfor %}
+  {% for p in removing %}
+    <li><span class="dot off"></span> <b>{{ p.name }}</b> <span class="hint">↔ MEGA {{ p.remote }} — stopping the sync…</span></li>
+  {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Add a folder</h2>
+  {% if not can_add %}
+  <p>Adding folders needs the MEGA login and the MEGA folder (Setup page).</p>
+  {% else %}
+  <p class="hint">Pick a MEGA folder. It must not be inside, or contain, a folder that is already synced.</p>
+  {{ pair_form(browse, parent, folders, folder_error, suggest, browse_view) }}
+  {% endif %}
+</section>
+
+{% if other %}
+<section class="card">
+  <h2>Not synced</h2>
+  <p class="hint">These items are in the app's MEGA folder on Umbrel but belong to no synced folder.
+  They are not synced with MEGA and not backed up:</p>
+  <ul class="plain">{% for e in other[:50] %}<li>{{ e }}</li>{% endfor %}</ul>
+  {% if other|length > 50 %}<p class="hint">…and {{ other|length - 50 }} more.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

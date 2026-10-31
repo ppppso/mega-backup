@@ -47,6 +47,8 @@ jobs:
           docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 -x -P scripts scripts/*.sh tests/*.sh
           docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint bash \
             mega-backup:local /tests/backup_test.sh
+          docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint bash \
+            mega-backup:local /tests/pairs_test.sh
           docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint python3 \
             mega-backup:local -I /tests/web_test.py
 

@@ -1,5 +1,6 @@
 """Web UI for Backup for MEGA (Flask). Served by waitress from server.py."""
 import collections
+import contextlib
 import datetime
 import hmac
 import os
@@ -16,6 +17,7 @@ from flask import (Flask, Response, abort, flash, jsonify, redirect, render_temp
 import engine
 import jobs
 import megalogin
+import pairs
 import restic
 import settings
 
@@ -108,6 +110,8 @@ def create_app():
     )
     app.jinja_env.filters["bytes"] = human_bytes
     app.jinja_env.filters["when"] = human_time
+    app.jinja_env.filters["day"] = lambda d: d.strftime("%-d %b %Y") if d else ""
+    app.jinja_env.filters["month"] = lambda d: d.strftime("%b %Y") if d else ""
     app_login_limit = RateLimit(5, 15 * 60)
     mega_login_limit = RateLimit(5, 15 * 60)
     mega_login_lock = threading.Lock()
@@ -166,21 +170,61 @@ def create_app():
             "login": {"done": bool(who), "who": who, "server": who is not None},
             "password": {"done": s["restic_password_saved"],
                          "available": engine.restic_password() is not None},
-            "folder": {"done": bool(s["mega_remote_path"]), "path": s["mega_remote_path"],
-                       "local_empty": engine.dir_is_empty(engine.CURRENT)},
+            "folder": {"done": bool(pairs.active()) or bool(s["mega_remote_path"] and pairs_missing()),
+                       "pairs": pairs.active(), "legacy": s["mega_remote_path"]},
         }
         steps["complete"] = all(v["done"] for v in steps.values())
         return steps
 
+    def pairs_missing():
+        try:
+            return pairs.read() is None
+        except ValueError:
+            return False
+
+    def folders_state(who=None):
+        """Each folder pair with its sync state in plain words."""
+        rows = engine.sync_rows() if who else None
+        problems = engine.pairs_problems()
+        out = []
+        for p in pairs.active():
+            local = engine.pair_dir(p["name"])
+            row = None if rows is None else rows.get(local, {})
+            level, words = engine.sync_words(row, who)
+            if problems.get(p["name"]):
+                level, words = "bad", problems[p["name"]]
+            out.append({"name": p["name"], "remote": p["remote"], "path": local,
+                        "level": level, "text": words,
+                        "needs_merge": (not row and not p.get("merge")
+                                        and not engine.dir_is_empty(local)),
+                        "stopped": bool(row) and (row["run_state"] in ("Disabled", "Suspended")
+                                                  or row["error"] not in ("NO", "")),
+                        "resuming": os.path.exists(engine.cfg(f"pair-state/{p['name']}.resume")),
+                        "in_rubbish": bool(row) and row["remote"].startswith("//bin/"),
+                        "added": p.get("added")})
+        return out
+
     def status_data():
         who = engine.whoami()
-        row = engine.sync_row() if who else None
-        level, words = engine.sync_words(row, who)
+        folders = folders_state(who)
+        order = {"bad": 3, "busy": 2, "off": 1, "ok": 0}
+        if folders:
+            worst = max(folders, key=lambda f: order.get(f["level"], 0))
+            level = worst["level"]
+            if len(folders) == 1:
+                words = worst["text"]
+            else:
+                words = {"ok": "All folders in sync.", "busy": "Syncing…",
+                         "bad": "A folder needs attention."}.get(level, "Not syncing.")
+        else:
+            level, words = engine.sync_words({} if who else None, who)
         st = engine.read_json("engine-status.json") or {}
         return {
             "engine": st,
             "who": who,
-            "sync": {"level": level, "text": words, "row": row},
+            "sync": {"level": level, "text": words},
+            "folders": folders,
+            "guard": [n for n, _ in engine.guard_empty()] if st.get("state") == "guard-refusing" else [],
             "last_run": engine.read_json("last-run.json"),
             "backup_running": engine.backup_running() or (jobs.running() and jobs.current()["kind"] == "backup"),
             "job": jobs.current(),
@@ -226,7 +270,8 @@ def create_app():
     @app.get("/")
     @login_required
     def index():
-        if not setup_state()["complete"]:
+        held = (engine.read_json("engine-status.json") or {}).get("state") in ("guard-refusing", "folder-missing")
+        if not held and not setup_state()["complete"]:
             return redirect(url_for("setup"))
         return render_template("status.html", page="status", data=status_data())
 
@@ -239,16 +284,14 @@ def create_app():
         if not browse.startswith("/") or ".." in browse.split("/"):
             browse = "/"
         if steps["login"]["done"] and not steps["folder"]["done"]:
-            try:
-                folders = engine.list_folders(browse)
-            except RuntimeError as e:
-                folder_error = str(e)
+            folders, folder_error = browse_mega(browse)
         password = None
         if steps["password"]["available"] and not steps["password"]["done"]:
             password = engine.restic_password()
         parent = browse.rsplit("/", 1)[0] or "/"
         return render_template("setup.html", page="setup", steps=steps, browse=browse,
                                parent=parent, folders=folders, folder_error=folder_error,
+                               suggest=pairs.suggest_name(browse), browse_view="setup",
                                restic_password=password, needs_code=session.pop("needs_code", False),
                                email=session.pop("login_email", ""))
 
@@ -291,29 +334,142 @@ def create_app():
             settings.update({"restic_password_saved": True})
         return redirect(url_for("setup"))
 
-    @app.post("/setup/start")
+    def browse_mega(path):
+        try:
+            return engine.list_folders(path), None
+        except RuntimeError as e:
+            return [], str(e)
+
+    def safe_browse(value):
+        value = value or "/"
+        if not value.startswith("/") or ".." in value.split("/"):
+            return "/"
+        return value
+
+    # --- folder pairs --------------------------------------------------------
+
+    @app.get("/folders")
     @login_required
-    def start():
+    def folders_page():
         steps = setup_state()
+        if not (steps["folders"]["done"] and steps["login"]["done"] and steps["password"]["done"]):
+            return redirect(url_for("setup"))
+        who = engine.whoami()
+        browse = safe_browse(request.args.get("path"))
+        folders, folder_error = browse_mega(browse) if who else ([], None)
+        active = folders_state(who)
+        rows = (engine.sync_rows() or {}) if who else {}
+        removing = [p for p in pairs.removed() if engine.pair_dir(p["name"]) in rows]
+        return render_template(
+            "folders.html", page="folders", pairs=active, removing=removing,
+            other=engine.other_items([p["name"] for p in active] + [p["name"] for p in removing]),
+            browse=browse, parent=browse.rsplit("/", 1)[0] or "/", folders=folders,
+            folder_error=folder_error, suggest=pairs.suggest_name(browse), browse_view="folders_page",
+            can_add=engine.mount_ok(engine.CURRENT) and bool(who))
+
+    @app.post("/folders/add")
+    @login_required
+    def folder_add():
+        steps = setup_state()
+        from_setup = request.form.get("from") == "setup"
+        remote = request.form.get("path", "")
+        name = request.form.get("name", "").strip() or pairs.suggest_name(remote)
+        back = url_for("setup" if from_setup else "folders_page", path=remote)
         if not (steps["folders"]["done"] and steps["login"]["done"] and steps["password"]["done"]):
             flash("Finish the steps above first.", "error")
             return redirect(url_for("setup"))
-        path = request.form.get("path", "")
-        if not path.startswith("/") or ".." in path.split("/"):
+        if not pairs.valid_remote(remote):
             flash("Pick a MEGA folder.", "error")
-            return redirect(url_for("setup"))
-        changes = {"mega_remote_path": path}
-        if not steps["folder"]["local_empty"]:
-            if request.form.get("merge") != "1":
-                flash("The local MEGA folder is not empty. Confirm the merge to continue.", "error")
-                return redirect(url_for("setup", path=path))
-            changes["allow_nonempty_init"] = True
+            return redirect(back)
+        if not pairs.valid_name(name):
+            flash("Use a folder name of up to 60 letters, digits, spaces and . _ - ( ), "
+                  "not starting with a dot or space.", "error")
+            return redirect(back)
+        local = engine.pair_dir(name)
+        if os.path.lexists(local) and not os.path.isdir(local):
+            flash(f"There is a file named '{name}' in the MEGA folder. Choose another name.", "error")
+            return redirect(back)
+        if local in (engine.sync_rows() or {}):
+            flash(f"The folder '{name}' is still being removed. Try again in a minute.", "error")
+            return redirect(back)
+        nonempty = not engine.dir_is_empty(local)
+        if nonempty and request.form.get("merge") != "1":
+            flash(f"The folder '{name}' in the MEGA folder already has files. Tick the box to merge "
+                  "them into MEGA, or choose another name.", "error")
+            return redirect(back)
         try:
-            settings.update(changes)
+            pairs.add(name, remote, merge=nonempty)
         except ValueError as e:
-            flash(f"Could not save: {e}", "error")
-            return redirect(url_for("setup", path=path))
-        flash(f"Starting the sync with {path}. The first download can take a while.", "ok")
+            flash(str(e), "error")
+            return redirect(back)
+        print(f"[web] Folder pair added: {name} <-> {remote}", flush=True)
+        flash(f"Added: {remote} on MEGA syncs with the folder '{name}' in the MEGA folder. "
+              "The sync starts within a minute; the first download can take a while.", "ok")
+        return redirect(url_for("index" if from_setup else "folders_page"))
+
+    @app.post("/folders/remove")
+    @login_required
+    def folder_remove():
+        name = request.form.get("name", "")
+        if request.form.get("confirm") != "1":
+            flash("Tick the box to confirm.", "error")
+            return redirect(url_for("folders_page"))
+        try:
+            pairs.remove(name)
+        except ValueError as e:
+            flash(str(e), "error")
+            return redirect(url_for("folders_page"))
+        print(f"[web] Folder pair removed: {name}", flush=True)
+        flash(f"'{name}' is no longer synced (within a minute). Its files stay on MEGA and in the "
+              "MEGA folder here; its snapshots stay until they expire, or until you delete them on "
+              "the Snapshots page.", "ok")
+        return redirect(url_for("folders_page"))
+
+    @app.post("/folders/merge")
+    @login_required
+    def folder_merge():
+        name = request.form.get("name", "")
+        if request.form.get("confirm") != "1":
+            flash("Tick the box to confirm.", "error")
+            return redirect(url_for("folders_page"))
+        try:
+            pairs.allow_merge(name)
+        except ValueError as e:
+            flash(str(e), "error")
+            return redirect(url_for("folders_page"))
+        print(f"[web] Folder pair {name}: merge into MEGA allowed.", flush=True)
+        flash(f"The files in '{name}' will be merged into MEGA when the sync starts (within a minute).", "ok")
+        return redirect(url_for("folders_page"))
+
+    @app.post("/folders/resume")
+    @login_required
+    def folder_resume():
+        name = request.form.get("name", "")
+        if not any(p["name"] == name for p in pairs.active()):
+            abort(404, "No such folder.")
+        os.makedirs(engine.cfg("pair-state"), exist_ok=True)
+        with open(engine.cfg(f"pair-state/{name}.resume"), "w") as f:
+            f.write(time.strftime("%F %T") + "\n")
+        print(f"[web] Folder pair {name}: resume asked.", flush=True)
+        flash(f"Resuming the sync of '{name}' within a minute.", "ok")
+        return redirect(url_for("folders_page"))
+
+    @app.post("/guard/continue")
+    @login_required
+    def guard_continue():
+        name = request.form.get("name", "")
+        if request.form.get("confirm") != "1":
+            flash("Tick the box to confirm.", "error")
+            return redirect(url_for("index"))
+        for n, marker in engine.guard_empty():
+            if n == name:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(marker)
+                print(f"[web] Empty-folder guard cleared for {name or 'the MEGA folder'}.", flush=True)
+                flash("Confirmed. Syncing resumes within a few seconds.", "ok")
+                break
+        else:
+            flash("That folder is not held back (any more).", "info")
         return redirect(url_for("index"))
 
     @app.get("/log")
@@ -335,6 +491,33 @@ def create_app():
         return redirect(request.form.get("back") if request.form.get("back") in ("/", "/snapshots")
                         else url_for("index"))
 
+    def snapshot_groups(snaps):
+        """Snapshots by folder: the folder pairs first (in order), then folders that are
+        no longer synced (removed pairs, the single-folder setup), newest first."""
+        cfg = settings.effective()
+        window = max(cfg["keep_daily"], cfg["keep_monthly"] * 31, 2)
+        groups, seen = [], set()
+        for p in pairs.active():
+            path = engine.pair_dir(p["name"])
+            seen.add(path)
+            groups.append({"path": path, "label": p["name"], "remote": p["remote"], "active": True,
+                           "snaps": [s for s in snaps if s["path"] == path]})
+        removed = {engine.pair_dir(p["name"]): p for p in pairs.removed()}
+        legacy = cfg["mega_remote_path"]
+        for s in snaps:
+            if s["path"] in seen:
+                continue
+            seen.add(s["path"])
+            folder = s["folder"]
+            label = folder if folder else "Whole MEGA folder (old)" if folder == "" else s["path"]
+            remote = (removed[s["path"]].get("remote") if s["path"] in removed
+                      else legacy if folder == "" else None)
+            group = [o for o in snaps if o["path"] == s["path"]]
+            groups.append({"path": s["path"], "label": label, "remote": remote, "active": False,
+                           "snaps": group,
+                           "expires": group[0]["time"] + datetime.timedelta(days=window)})
+        return groups
+
     @app.get("/snapshots")
     @login_required
     def snapshots():
@@ -342,9 +525,46 @@ def create_app():
             snaps, error = restic.snapshots(), None
         except restic.ResticError as e:
             snaps, error = [], str(e)
-        return render_template("snapshots.html", page="snapshots", snaps=snaps, error=error,
-                               running=engine.backup_running() or jobs.running(),
-                               keep=settings.effective())
+        groups = snapshot_groups(snaps)
+        cfg = settings.effective()
+        try:
+            kept = restic.retention(snaps, cfg["keep_daily"], cfg["keep_monthly"]) if snaps else {}
+        except restic.ResticError:
+            kept = {}
+        for g in groups:
+            for s in g["snaps"]:
+                k = kept.get(s["id"]) or {}
+                if not g["active"]:
+                    k = dict(k, until=g["expires"].date(), kept_as=["folder not synced"], remove=False)
+                s["kept"] = k
+        want = request.args.get("folder")
+        current = next((g for g in groups if g["path"] == want), groups[0] if groups else None)
+        last = engine.read_json("last-run.json") or {}
+        return render_template("snapshots.html", page="snapshots", groups=groups, group=current,
+                               error=error, running=engine.backup_running() or jobs.running(),
+                               keep=settings.effective(), repo_bytes=last.get("repo_bytes"),
+                               legacy_path=engine.CURRENT.rstrip("/"),
+                               hold=engine.prune_hold() is not None,
+                               freed=last.get("bytes_freed"))
+
+    @app.post("/snapshots/delete-folder")
+    @login_required
+    def snapshots_delete_folder():
+        path = request.form.get("path", "")
+        back = url_for("snapshots", folder=path)
+        if request.form.get("confirm") != "1":
+            flash("Tick the box to confirm.", "error")
+            return redirect(back)
+        groups = snapshot_groups(restic.snapshots())
+        group = next((g for g in groups if g["path"] == path and not g["active"]), None)
+        if not group:
+            abort(404, "No such folder, or it is still synced.")
+        if jobs.start_forget(f"Deleting the snapshots of {group['label']}", ["--path", path]):
+            flash(f"Deleting {len(group['snaps'])} snapshot(s) of {group['label']}. "
+                  "The Status page shows when it's done.", "ok")
+        else:
+            flash("A backup, restore or delete is already running. Try again when it's done.", "error")
+        return redirect(url_for("snapshots"))
 
     def _snap_or_404(snap_id):
         try:
@@ -424,6 +644,20 @@ def create_app():
         else:
             flash("A backup or restore is already running. Try again when it's done.", "error")
         return redirect(back)
+
+    @app.post("/snapshots/<snap_id>/delete")
+    @login_required
+    def snapshot_delete(snap_id):
+        snap, _ = _snap_or_404(snap_id)
+        if request.form.get("confirm") != "1":
+            flash("Tick the box to confirm.", "error")
+            return redirect(url_for("snapshot", snap_id=snap["short_id"]))
+        label = f"Deleting the snapshot of {human_time(snap['time'])}"
+        if engine.backup_running() or not jobs.start_forget(label, ["--snapshot", snap["id"]]):
+            flash("A backup, restore or delete is already running. Try again when it's done.", "error")
+            return redirect(url_for("snapshot", snap_id=snap["short_id"]))
+        flash(f"{label} started. The Status page shows when it's done.", "ok")
+        return redirect(url_for("snapshots", folder=snap["path"]))
 
     # --- prune hold -------------------------------------------------------------
 

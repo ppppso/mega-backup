@@ -26,9 +26,19 @@
   function render(d) {
     $("sync-dot").className = "dot " + d.sync.level;
     $("sync-text").textContent = d.sync.text;
-    var detail = d.who ? "Account: " + d.who : "";
-    if (d.sync.row && d.sync.row.remote) detail += " · MEGA folder: " + d.sync.row.remote;
-    $("sync-detail").textContent = detail;
+    $("sync-detail").textContent = d.who ? "Account: " + d.who : "";
+    var list = $("folders");
+    list.textContent = "";
+    (d.folders || []).forEach(function (f) {
+      var li = document.createElement("li"), dot = document.createElement("span"),
+          b = document.createElement("b"), hint = document.createElement("span");
+      dot.className = "dot " + f.level;
+      b.textContent = f.name;
+      hint.className = "hint";
+      hint.textContent = "↔ MEGA " + f.remote + ": " + f.text;
+      li.append(dot, " ", b, " ", hint);
+      list.appendChild(li);
+    });
 
     var e = d.engine || {};
     $("engine-text").textContent = d.backup_running ? "A backup is running now…" : (e.message || "");
@@ -53,11 +63,19 @@
       else t += "FAILED: " + r.problems.join("; ");
       if (r.diff) t += " Changes: " + r.diff.added + " added, " + r.diff.changed + " changed, " + r.diff.removed + " removed.";
       if (r.files_total != null) t += " " + r.files_total + " files, " + bytes(r.bytes_added) + " new data.";
+      if (r.folders && r.folders.length > 1) {
+        var bad = r.folders.filter(function (f) { return f.result !== "ok"; }).map(function (f) { return f.name; });
+        t += " Folders: " + r.folders.length + (bad.length ? " (with problems: " + bad.join(", ") + ")" : ", all OK") + ".";
+      }
       $("last-run").textContent = t;
       $("last-run").className = r.result === "ok" ? "" : "flash error";
     }
     $("next-run").textContent = e.next_backup ? "Next backup: " + when(e.next_backup) + "." : "";
     $("hold").hidden = !d.prune_hold;
+    var space = [];
+    if (r && r.repo_bytes != null) space.push("Backup folder size: " + bytes(r.repo_bytes));
+    if (r && r.bytes_freed != null) space.push("freed by the last clean-up: " + bytes(r.bytes_freed));
+    $("space").textContent = space.length ? space.join(", ") + "." : "";
 
     var parts = [];
     if (d.disk.current) parts.push("MEGA folder disk: " + bytes(d.disk.current.free) + " free of " + bytes(d.disk.current.total));

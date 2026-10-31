@@ -1,0 +1,27 @@
+{# Pick a MEGA folder and the name of its local folder. browse_view: the page that
+   browses (setup or folders_page); from: "setup" when shown during setup. #}
+{% macro pair_form(browse, parent, folders, folder_error, suggest, browse_view, from='') %}
+<p class="path">MEGA: <b>{{ browse }}</b>
+  {% if browse != '/' %} · <a href="{{ url_for(browse_view, path=parent) }}">up one level</a>{% endif %}</p>
+{% if folder_error %}<p class="flash error">{{ folder_error }}</p>{% endif %}
+<ul class="folders">
+  {% for f in folders %}
+  {% set p = (browse.rstrip('/') ~ '/' ~ f) %}
+  <li><a href="{{ url_for(browse_view, path=p) }}"><span class="ico-folder" aria-hidden="true"></span>{{ f }}</a></li>
+  {% else %}
+  <li class="hint">No sub-folders here.</li>
+  {% endfor %}
+</ul>
+<form method="post" action="{{ url_for('folder_add') }}" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="path" value="{{ browse }}">
+  <input type="hidden" name="from" value="{{ from }}">
+  <label>Local folder name (inside the app's MEGA folder on Umbrel)
+    <input name="name" value="{{ suggest }}" maxlength="60" required
+           pattern="[A-Za-z0-9_][A-Za-z0-9 _.()\-]{0,59}"
+           title="Letters, digits, spaces and . _ - ( ); not starting with a dot or space"></label>
+  <label class="check"><input type="checkbox" name="merge" value="1"> If a local folder with this name already
+    has files: merge them into MEGA</label>
+  <button>Sync {{ 'the whole account' if browse == '/' else browse }}</button>
+</form>
+{% endmacro %}

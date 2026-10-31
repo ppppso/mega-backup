@@ -118,6 +118,7 @@ sys.path.insert(0, os.environ.get("WEB_DIR", "/app/web"))
 import app as webapp  # noqa: E402
 import engine  # noqa: E402
 import jobs  # noqa: E402
+import pairs  # noqa: E402
 import settings  # noqa: E402
 
 CSRF = re.compile(r'name="csrf" value="([^"]+)"')
@@ -157,7 +158,16 @@ class Base(unittest.TestCase):
 
 
 def path_page(path):
-    return "/setup" if path.startswith("/setup") else "/login"
+    return "/login" if path.startswith("/login") else "/setup"
+
+
+def wait_job():
+    import time
+    for _ in range(240):
+        if not jobs.running():
+            break
+        time.sleep(0.5)
+    return jobs.current()
 
 
 class AuthTest(Base):
@@ -177,9 +187,9 @@ class AuthTest(Base):
 
     def test_post_actions_need_login_and_csrf(self):
         self.login()
-        r = self.c.post("/setup/start", data={"path": "/Photos"})
+        r = self.c.post("/folders/add", data={"path": "/Photos"})
         self.assertEqual(r.status_code, 400)
-        self.assertNotIn("mega_remote_path", settings.read_file())
+        self.assertIsNone(pairs.read())
 
     def test_wrong_password_and_rate_limit(self):
         for _ in range(5):
@@ -297,31 +307,156 @@ class SetupTest(Base):
         self.assertNotIn("notes.txt", page)
         page = self.text("/setup?path=/Missing")
         self.assertIn("Couldn&#39;t find", page)
-        r = self.post("/setup/start", {"path": "/Photos"})
-        self.assertEqual(settings.read_file()["mega_remote_path"], "/Photos")
+        self.assertIn('value="Photos"', self.text("/setup?path=/Photos"))   # suggested name
+        r = self.post("/folders/add", {"path": "/Photos", "name": "Photos", "from": "setup"})
+        self.assertEqual(pairs.active()[0]["remote"], "/Photos")
+        self.assertEqual(pairs.active()[0]["name"], "Photos")
+        self.assertFalse(pairs.active()[0]["merge"])
         self.assertEqual(r.headers["Location"], "/")
         self.assertEqual(self.c.get("/").status_code, 200)
+        self.assertIn("→ folder 'Photos'", self.text("/setup"))
 
     def test_start_rejects_bad_paths(self):
         self.finish_login_and_password()
-        for p in ("Photos", "/a/../b", ""):
-            self.post("/setup/start", {"path": p})
-            self.assertNotIn("mega_remote_path", settings.read_file(), p)
+        for p, n in (("Photos", "x"), ("/a/../b", "x"), ("", "x"), ("/Photos", ".hidden"),
+                     ("/Photos", "a/b"), ("/Photos", "../up"), ("/Photos", "x" * 61)):
+            self.post("/folders/add", {"path": p, "name": n, "from": "setup"})
+            self.assertEqual(pairs.active(), [], (p, n))
 
     def test_start_nonempty_needs_merge(self):
         self.finish_login_and_password()
-        open(os.path.join(T, "current", "old.txt"), "w").write("x")
-        self.assertIn("uploaded to MEGA", self.text("/setup"))
-        self.post("/setup/start", {"path": "/Photos"})
-        self.assertNotIn("mega_remote_path", settings.read_file())
-        self.post("/setup/start", {"path": "/Photos", "merge": "1"})
-        self.assertEqual(settings.read_file()["mega_remote_path"], "/Photos")
-        self.assertTrue(settings.read_file()["allow_nonempty_init"])
+        os.makedirs(os.path.join(T, "current", "Photos"))
+        open(os.path.join(T, "current", "Photos", "old.txt"), "w").write("x")
+        self.post("/folders/add", {"path": "/Photos", "name": "Photos", "from": "setup"})
+        self.assertEqual(pairs.active(), [])
+        self.assertIn("already has files", self.text("/setup"))
+        self.post("/folders/add", {"path": "/Photos", "name": "Photos", "merge": "1", "from": "setup"})
+        self.assertTrue(pairs.active()[0]["merge"])
 
     def test_start_needs_previous_steps(self):
         self.login()
-        self.post("/setup/start", {"path": "/Photos"})
-        self.assertNotIn("mega_remote_path", settings.read_file())
+        self.post("/folders/add", {"path": "/Photos", "name": "Photos"})
+        self.assertIsNone(pairs.read())
+
+    def test_single_folder_setup_counts_as_done(self):
+        self.finish_login_and_password()
+        settings.update({"mega_remote_path": "/Photos"})   # migrated by the engine on start
+        self.assertEqual(self.c.get("/").status_code, 200)
+
+
+class FoldersTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.login()
+        open(os.path.join(STATE, "logged-in"), "w").write("me@example.com")
+        settings.update({"restic_password_saved": True})
+        pairs.add("Photos", "/Photos")
+
+    def add(self, path, name, **extra):
+        return self.post("/folders/add", dict(path=path, name=name, **extra))
+
+    def test_add_more_and_rules(self):
+        page = self.text("/folders?path=/")
+        self.assertIn("My Documents", page)
+        self.add("/My Documents", "Docs")
+        self.assertEqual([p["name"] for p in pairs.active()], ["Photos", "Docs"])
+        self.add("/Photos/2024", "Sub")
+        self.assertIn("MEGA cannot sync nested folders", self.text("/folders"))
+        self.add("/", "All")
+        self.add("/Other", "photos")
+        self.assertIn("already a folder named", self.text("/folders"))
+        self.assertEqual(len(pairs.active()), 2)
+        open(os.path.join(T, "current", "afile"), "w").write("x")
+        self.add("/Other", "afile")
+        self.assertIn("There is a file named", self.text("/folders"))
+
+    def test_remove_and_add_again(self):
+        self.post("/folders/remove", {"name": "Photos"})
+        self.assertEqual(len(pairs.active()), 1)                  # needs the tick
+        self.post("/folders/remove", {"name": "Photos", "confirm": "1"})
+        self.assertEqual(pairs.active(), [])
+        self.assertEqual(pairs.removed()[0]["name"], "Photos")
+        # The engine has not removed the sync yet: adding it again must wait.
+        with open(os.path.join(STATE, "sync"), "w") as f:
+            f.write(f"{os.path.join(T, 'current', 'Photos')}|Running|Synced|NO|/Photos\n")
+        self.assertIn("stopping the sync", self.text("/folders"))
+        self.add("/Photos", "Photos")
+        self.assertEqual(pairs.active(), [])
+        self.assertIn("still being removed", self.text("/folders"))
+        os.unlink(os.path.join(STATE, "sync"))
+        engine.clear_cache()
+        self.add("/Photos", "Photos")
+        self.assertEqual(pairs.active()[0]["name"], "Photos")
+        self.assertEqual(pairs.removed(), [])
+
+    def test_merge_button_and_status(self):
+        d = os.path.join(T, "current", "Photos")
+        os.makedirs(d)
+        open(os.path.join(d, "x.txt"), "w").write("x")
+        with open(os.path.join(T, "config", "pairs-status.json"), "w") as f:
+            json.dump({"problems": {"Photos": "The local folder already has files."}}, f)
+        page = self.text("/folders")
+        self.assertIn("Merge and start syncing", page)
+        st = self.c.get("/api/status").get_json()
+        self.assertEqual(st["folders"][0]["level"], "bad")
+        self.assertIn("already has files", st["sync"]["text"])   # one folder: its own words
+        pairs.add("Docs", "/My Documents")
+        st = self.c.get("/api/status").get_json()
+        self.assertEqual(st["sync"]["text"], "A folder needs attention.")
+        self.post("/folders/merge", {"name": "Photos", "confirm": "1"})
+        self.assertTrue(pairs.active()[0]["merge"])
+
+    def test_resume_stopped_sync(self):
+        with open(os.path.join(STATE, "sync"), "w") as f:
+            f.write(f"{os.path.join(T, 'current', 'Photos')}|Disabled|Processing|"
+                    "Remote node moved to Rubbish Bin|//bin/Photos\n")
+        page = self.text("/folders")
+        self.assertIn("in MEGA's Rubbish bin. Restore it there", page)
+        self.assertRegex(page, r"<button disabled>Resume sync")
+        with open(os.path.join(STATE, "sync"), "w") as f:     # restored, still stopped
+            f.write(f"{os.path.join(T, 'current', 'Photos')}|Disabled|Processing|"
+                    "Remote node moved to Rubbish Bin|/Photos\n")
+        self.assertRegex(self.text("/folders"), r"<button >Resume sync")
+        self.post("/folders/resume", {"name": "Photos"})
+        self.assertTrue(os.path.exists(os.path.join(T, "config", "pair-state", "Photos.resume")))
+        self.assertIn("Resuming…", self.text("/folders"))
+        self.assertEqual(self.post("/folders/resume", {"name": "../x"}).status_code, 404)
+
+    def test_other_items_listed(self):
+        os.makedirs(os.path.join(T, "current", "Photos"))
+        os.makedirs(os.path.join(T, "current", "stray"))
+        page = self.text("/folders")
+        self.assertIn("Not synced", page)
+        self.assertIn("stray", page)
+
+    def test_broken_pairs_file(self):
+        with open(pairs.path(), "w") as f:
+            f.write("nope")
+        self.assertEqual(pairs.active(), [])
+        with self.assertRaises(ValueError):
+            pairs.add("X", "/X")
+        self.assertEqual(open(pairs.path()).read(), "nope")   # never overwritten
+
+    def test_guard_continue(self):
+        d = os.path.join(T, "current", "Photos")
+        os.makedirs(d)
+        os.makedirs(os.path.join(T, "config", "pair-state"))
+        marker = os.path.join(T, "config", "pair-state", "Photos.established")
+        open(marker, "w").write("x")
+        with open(os.path.join(T, "config", "engine-status.json"), "w") as f:
+            json.dump({"state": "guard-refusing", "message": "empty"}, f)
+        os.unlink(os.path.join(STATE, "server"))   # MEGAcmd is not started while held
+        page = self.text("/")
+        self.assertIn("is empty", page)
+        self.assertIn("Continue syncing", page)
+        self.post("/guard/continue", {"name": "Photos"})
+        self.assertTrue(os.path.exists(marker))
+        self.post("/guard/continue", {"name": "Photos", "confirm": "1"})
+        self.assertFalse(os.path.exists(marker))
+        open(marker, "w").write("x")
+        open(os.path.join(d, "f"), "w").write("x")   # not empty: nothing to clear
+        self.post("/guard/continue", {"name": "Photos", "confirm": "1"})
+        self.assertTrue(os.path.exists(marker))
 
 
 class StatusTest(Base):
@@ -329,11 +464,12 @@ class StatusTest(Base):
         super().setUp()
         self.login()
         open(os.path.join(STATE, "logged-in"), "w").write("me@example.com")
-        settings.update({"restic_password_saved": True, "mega_remote_path": "/Photos"})
+        settings.update({"restic_password_saved": True})
+        pairs.add("Photos", "/Photos")
 
     def test_status_api(self):
         with open(os.path.join(STATE, "sync"), "w") as f:
-            f.write(f"{os.environ['MB_CURRENT']}|Running|Synced|NO|/Photos\n")
+            f.write(f"{os.environ['MB_CURRENT']}/Photos|Running|Synced|NO|/Photos\n")
         with open(os.path.join(T, "config", "last-run.json"), "w") as f:
             json.dump({"result": "ok", "problems": [], "finished": "2026-10-29T03:31:00+00:00"}, f)
         with open(os.path.join(T, "config", "engine-status.json"), "w") as f:
@@ -341,7 +477,8 @@ class StatusTest(Base):
         engine.clear_cache()
         d = self.c.get("/api/status").get_json()
         self.assertEqual(d["sync"]["level"], "ok")
-        self.assertEqual(d["sync"]["row"]["remote"], "/Photos")
+        self.assertEqual(d["folders"][0]["remote"], "/Photos")
+        self.assertEqual(d["folders"][0]["text"], "In sync.")
         self.assertEqual(d["last_run"]["result"], "ok")
         self.assertEqual(d["engine"]["state"], "running")
         self.assertFalse(d["prune_hold"])
@@ -385,7 +522,7 @@ class SnapshotsTest(Base):
         super().setUp()
         import subprocess
         subprocess.run(["restic", "init", "-q"], check=True, stdout=subprocess.DEVNULL)
-        cur = os.path.join(T, "current")
+        cur = os.path.join(T, "current", "Photos")
         os.makedirs(os.path.join(cur, "sub"))
         with open(os.path.join(cur, "a.txt"), "w") as f:
             f.write("apple\n")
@@ -394,7 +531,8 @@ class SnapshotsTest(Base):
         os.utime(os.path.join(cur, "sub", "b c.txt"), (1600000000, 1600000000))
         self.login()
         open(os.path.join(STATE, "logged-in"), "w").write("me@example.com")
-        settings.update({"restic_password_saved": True, "mega_remote_path": "/Photos"})
+        settings.update({"restic_password_saved": True})
+        pairs.add("Photos", "/Photos")
 
     def backup(self, ok=True):
         r = self.post("/backup-now", {"back": "/"}, page="/setup")
@@ -413,7 +551,7 @@ class SnapshotsTest(Base):
         return list(dict.fromkeys(found))   # each row links twice; keep order
 
     def test_backup_browse_download_restore_diff(self):
-        self.assertIn("No snapshots yet", self.text("/snapshots"))
+        self.assertIn("No snapshots of this folder yet", self.text("/snapshots"))
         page = self.backup()
         self.assertIn("latest", page)
         self.assertEqual(json.load(open(os.path.join(T, "config", "last-run.json")))["result"], "ok")
@@ -421,7 +559,7 @@ class SnapshotsTest(Base):
 
         page = self.text(f"/snapshots/{sid}")
         self.assertIn("a.txt", page)
-        self.assertIn("📁 sub", page)
+        self.assertIn("<span class=\"ico-folder\" aria-hidden=\"true\"></span>sub", page)
         self.assertNotIn("b c.txt", page)            # only direct contents
         self.assertIn("b c.txt", self.text(f"/snapshots/{sid}?path=sub"))
 
@@ -454,10 +592,11 @@ class SnapshotsTest(Base):
         self.assertEqual(open(os.path.join(d, "a.txt")).read(), "apple\n")
         d2 = restore("")
         self.assertNotEqual(d, d2)                  # never overwrites an earlier restore
-        self.assertEqual(open(os.path.join(T, "current", "a.txt")).read(), "apple\n")  # source untouched
+        self.assertEqual(open(os.path.join(T, "current", "Photos", "a.txt")).read(), "apple\n")  # source untouched
+        self.assertTrue(os.path.basename(d).endswith("_Photos"), d)   # named after the folder
 
-        os.unlink(os.path.join(T, "current", "a.txt"))
-        with open(os.path.join(T, "current", "new.txt"), "w") as f:
+        os.unlink(os.path.join(T, "current", "Photos", "a.txt"))
+        with open(os.path.join(T, "current", "Photos", "new.txt"), "w") as f:
             f.write("new\n")
         # 1 of 2 files removed = 50%: the mass-change guard trips, as it should.
         self.backup(ok=False)
@@ -471,6 +610,77 @@ class SnapshotsTest(Base):
         self.assertIn("new.txt", page)
         self.assertIn("1</span> removed", page.replace("− ", ""))
         self.assertIn("1</span> added", page.replace("+ ", ""))
+
+    def test_folders_and_deleting(self):
+        import subprocess
+        self.backup()
+        docs = os.path.join(T, "current", "Docs")
+        os.makedirs(docs)
+        open(os.path.join(docs, "d.txt"), "w").write("doc\n")
+        pairs.add("Docs", "/My Documents")
+        self.backup()
+        page = self.text("/snapshots")
+        self.assertIn(">Photos</a>", page)
+        self.assertIn(">Docs</a>", page)
+        docs_page = self.text(f"/snapshots?folder={docs}")
+        ids = list(dict.fromkeys(re.findall(r'href="/snapshots/([0-9a-f]{8})"', docs_page)))
+        self.assertEqual(len(ids), 1)
+        self.assertIn("d.txt", self.text(f"/snapshots/{ids[0]}"))
+        self.assertIn(">Docs</a>", self.text(f"/snapshots/{ids[0]}"))   # crumb shows the folder
+        # Photos' second snapshot compares with Photos' first, not with Docs.
+        photos = list(dict.fromkeys(re.findall(r'href="/snapshots/([0-9a-f]{8})"', self.text("/snapshots"))))
+        self.assertEqual(len(photos), 2)
+        self.assertNotIn("d.txt", self.text(f"/snapshots/{photos[0]}/diff"))
+
+        # Snapshots from before folder pairs (whole MEGA folder) are shown as their own group.
+        subprocess.run(["restic", "backup", "-q", "--host", "mega-backup", os.path.join(T, "current")],
+                       check=True, stdout=subprocess.DEVNULL)
+        self.assertIn("Whole MEGA folder (old)", self.text("/snapshots"))
+
+        # A removed folder: its snapshots stay, and can be deleted.
+        pairs.remove("Docs")
+        page = self.text(f"/snapshots?folder={docs}")
+        self.assertIn("no longer synced", page)
+        self.post("/snapshots/delete-folder", {"path": docs})                 # needs the tick
+        self.assertIn("Tick the box", self.text(f"/snapshots?folder={docs}"))
+        self.post("/snapshots/delete-folder", {"path": docs, "confirm": "1"})
+        j = wait_job()
+        self.assertTrue(j["ok"], j["message"])
+        self.assertIn("freed", j["message"])
+        self.assertNotIn(">Docs", self.text("/snapshots"))
+        # An active folder's snapshots can't be deleted wholesale.
+        r = self.post("/snapshots/delete-folder", {"path": os.path.join(T, "current", "Photos"), "confirm": "1"})
+        self.assertEqual(r.status_code, 404)
+
+        # One snapshot.
+        self.post(f"/snapshots/{photos[1]}/delete", {"confirm": "1"})
+        j = wait_job()
+        self.assertTrue(j["ok"], j["message"])
+        left = list(dict.fromkeys(re.findall(r'href="/snapshots/([0-9a-f]{8})"', self.text("/snapshots"))))
+        self.assertEqual(left, [photos[0]])
+
+    def test_kept_until(self):
+        import subprocess
+        self.backup()
+        photos = os.path.join(T, "current", "Photos")
+        for t in ("2025-01-31 03:30:00", "2025-03-10 03:30:00"):
+            subprocess.run(["restic", "backup", "-q", "--host", "mega-backup", "--time", t, photos],
+                           check=True, stdout=subprocess.DEVNULL)
+        page = self.text("/snapshots")
+        self.assertIn("Kept until", page)
+        self.assertIn("last 2 days, daily", page)                  # today's backup
+        self.assertIn("daily, monthly", page)                       # last of an earlier month
+        m = re.search(r"~([A-Z][a-z]{2} \d{4})\s*<br><span class=\"hint\">daily, monthly", page)
+        self.assertIsNotNone(m, "monthly estimate shown as a month")
+        # Oldest snapshot, while there is less history than 24 months: kept as a
+        # monthly one, so about 24 months from the latest month (not this month's "+").
+        oldest = re.search(r'2025-01-31 03:30.*?<td class="kept">(.*?)</td>', page, re.S).group(1)
+        self.assertIn("monthly", oldest)
+        self.assertNotIn("+", oldest)
+        settings.update({"keep_daily": 1, "keep_monthly": 1})
+        self.assertIn("removed at the next clean-up", self.text("/snapshots"))
+        open(os.path.join(T, "config", "prune-hold"), "w").write("Prune hold set x\n")
+        self.assertIn("Nothing is removed while the prune hold is on", self.text("/snapshots"))
 
     def test_bad_inputs(self):
         self.backup()

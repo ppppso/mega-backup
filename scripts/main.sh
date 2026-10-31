@@ -1,12 +1,14 @@
 #!/bin/bash
 # The backup engine. Runs as PUID: starts MEGAcmd, waits for login and setup (done
-# in the web UI, or via .env for the plain compose setup), makes sure the sync and
-# the restic repo exist, then runs backup.sh once a day.
+# in the web UI, or via .env for the plain compose setup), keeps one sync per folder
+# pair (pairs.sh) and the restic repo, and runs backup.sh once a day.
 # Progress is written to /config/engine-status.json for the web UI (set_state).
 set -euo pipefail
 LOG_TAG=main
 # shellcheck source=lib.sh
 . /usr/local/bin/lib.sh
+# shellcheck source=pairs.sh
+. /usr/local/bin/pairs.sh
 
 SOCKET="$HOME/.megaCmd/megacmd.socket"
 SERVER_PID=""
@@ -61,32 +63,19 @@ set_state starting "Starting."
 
 # ---------------------------------------------------------------------------
 # 1. Folder guards, before MEGAcmd starts (it resumes existing syncs right away).
-#  - Not mounted: on Umbrel the "MEGA folder" was removed from the app settings,
-#    or never picked. The path is then an empty folder inside the container.
-#  - Mounted but empty, although a sync was set up before: the disk or bind mount is
-#    probably missing.
-# Either way, syncing could treat every file as deleted locally and delete it on
-# MEGA too. Refuse to start MEGAcmd until it's fixed.
-while true; do
-  if sync_was_created && ! mount_ok "$MB_CURRENT"; then
-    set_state folder-missing "The MEGA folder is not available. Pick it again in the app's Umbrel settings (or check SYNC_DIR), then restart the app."
-    log_banner \
-      "REFUSING TO START MEGAcmd: $MB_CURRENT is not mounted, but a sync was set up before." \
-      "Syncing now could delete your files on MEGA. Pick the MEGA folder in the app's" \
-      "settings on Umbrel (or check SYNC_DIR in .env), then restart. Re-checking every 5 minutes."
-  elif [ -e "$SYNC_MARKER" ] && dir_is_empty "$MB_CURRENT"; then
-    set_state guard-refusing "The MEGA folder is empty, but it had files before. The disk or folder is probably missing, so syncing is stopped to protect your files on MEGA."
-    log_banner \
-      "REFUSING TO START MEGAcmd: $MB_CURRENT is empty, but a sync was set up before." \
-      "The disk or the folder mount is probably missing; syncing now could delete" \
-      "your files on MEGA. Check the folder (Umbrel app settings, or SYNC_DIR in .env)." \
-      "If the MEGA folder really is empty and this is intended, run:" \
-      "  docker exec mega-backup rm $SYNC_MARKER" \
-      "Re-checking every 5 minutes."
-  else
-    break
+# See pairs_guard. Re-checked every 10 s, so a fix (or "continue" in the web UI)
+# applies quickly; the banner is repeated every 5 minutes.
+n=0
+until pairs_guard; do
+  set_state "$GUARD_STATE" "$GUARD_MSG"
+  if [ $(( n % 30 )) = 0 ]; then
+    log_banner "REFUSING TO START MEGAcmd: $GUARD_MSG" \
+      "Syncing now could delete your files on MEGA. Fix the folder (Umbrel app settings," \
+      "or SYNC_DIR in .env). If a folder really is meant to be empty, confirm it on the" \
+      "app's Status page."
   fi
-  isleep 300
+  n=$(( n + 1 ))
+  isleep 10
 done
 
 # ---------------------------------------------------------------------------
@@ -192,90 +181,34 @@ fi
 log "Logged in as: $(mega-whoami 2>/dev/null | head -n1)"
 
 # ---------------------------------------------------------------------------
-# 5. Wait until a MEGA folder is chosen (Setup page, or MEGA_REMOTE_PATH in .env).
+# 5. Move a single-folder setup to folder pairs (once), then wait until at least
+# one folder pair is set up (Folders page in the web UI).
 load_settings
-if [ -z "$CFG_MEGA_REMOTE_PATH" ]; then
-  set_state waiting-setup "Choose the MEGA folder to back up on the Setup page."
-  log "Waiting for a MEGA folder to be chosen in the web UI."
-  while [ -z "$CFG_MEGA_REMOTE_PATH" ]; do
+until pairs_migrate; do
+  set_state sync-error "Moving to folder pairs failed; retrying. See the log."
+  wait_checking 60
+  load_settings
+done
+if [ -z "$(pairs_active 2>/dev/null)" ]; then
+  set_state waiting-setup "Choose a MEGA folder to sync on the Setup page."
+  log "Waiting for a folder pair to be set up in the web UI."
+  while [ -z "$(pairs_active 2>/dev/null)" ]; do
     wait_checking 5 5
-    load_settings
   done
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Make sure the sync between $MB_CURRENT and the MEGA folder exists.
-SYNC_PROBLEM=""
-ensure_sync() {
-  local row remote want
-  want="$(strip_slash "$CFG_MEGA_REMOTE_PATH")"
-  SYNC_PROBLEM=""
-  row="$(sync_row || true)"
-  if [ -n "$row" ]; then
-    remote="$(strip_slash "${row##*|}")"
-    log "Sync exists: $MB_CURRENT <-> $remote (RUN_STATE|STATUS|ERROR: ${row%|*})"
-    [ -e "$SYNC_CREATED" ] || date '+%F %T' > "$SYNC_CREATED"
-    if [ "$remote" != "$want" ]; then
-      log_banner \
-        "WARNING: the existing sync points to '$remote', but the chosen MEGA folder is '$want'." \
-        "Leaving it unchanged. To switch, remove the old sync and empty $MB_CURRENT first:" \
-        "  docker exec mega-backup mega-sync -d $MB_CURRENT"
-    fi
-    return 0
-  fi
-
-  if ! mount_ok "$MB_CURRENT"; then
-    SYNC_PROBLEM="No local MEGA folder chosen. Pick one in the app's Umbrel settings (or set SYNC_DIR)."
-    log "Not creating the sync: $MB_CURRENT is not mounted (files would be lost on restart)."
-    return 1
-  fi
-  if mounts_overlap "$MB_CURRENT" "$RESTIC_REPOSITORY"; then
-    SYNC_PROBLEM="The MEGA folder and the Backup folder overlap. The Backup folder must not be inside the MEGA folder (or the other way round)."
-    log "Not creating the sync: $MB_CURRENT and $RESTIC_REPOSITORY are the same folder or nested."
-    return 1
-  fi
-  if ! mega-ls "$want" >/dev/null 2>&1; then
-    SYNC_PROBLEM="The MEGA folder '$want' does not exist (or is not accessible)."
-    log "ERROR: MEGA folder '$want' does not exist (or is not accessible)."
-    return 1
-  fi
-  if ! dir_is_empty "$MB_CURRENT" && [ "$CFG_ALLOW_NONEMPTY_INIT" != 1 ]; then
-    SYNC_PROBLEM="The local MEGA folder is not empty. A two-way sync would upload its files to MEGA. Empty it, or confirm the merge on the Setup page."
-    log_banner \
-      "Not creating the sync: $MB_CURRENT is not empty." \
-      "A two-way sync would merge these local files up into MEGA." \
-      "Empty the folder, or allow the merge (Setup page, or ALLOW_NONEMPTY_INIT=1)."
-    return 1
-  fi
-  log "Creating sync: $MB_CURRENT <-> $want"
-  if ! mega-sync "$MB_CURRENT" "$want"; then
-    SYNC_PROBLEM="MEGAcmd could not create the sync. See the log."
-    log "ERROR: mega-sync failed to create the sync."
-    return 1
-  fi
-  date '+%F %T' > "$SYNC_CREATED"
+# 6. Keep the syncs in line with the folder pairs: now, and every minute after.
+sync_pairs() {
+  pairs_reconcile || true
 }
-until ensure_sync; do
-  set_state sync-error "$SYNC_PROBLEM"
-  log "Retrying in 1 minute."
-  wait_checking 60
-  load_settings
-done
-
-# Arm the mount guard once the sync exists and the local folder has content.
-mark_sync_established() {
-  if [ ! -e "$SYNC_MARKER" ] && [ -n "$(sync_row || true)" ] && ! dir_is_empty "$MB_CURRENT"; then
-    date '+%F %T' > "$SYNC_MARKER"
-    log "Sync established; empty-folder guard armed ($SYNC_MARKER)."
-  fi
-}
-mark_sync_established
+sync_pairs
 
 # ---------------------------------------------------------------------------
 # 7. Scheduler. Settings are re-read every minute, so a new backup time applies
 # without a restart.
 run_backup() {
-  mark_sync_established
+  sync_pairs
   set_state backing-up "Backup running."
   /usr/local/bin/backup.sh &
   BACKUP_PID=$!
@@ -291,8 +224,8 @@ run_backup() {
 
 latest_snapshot_age() {
   local t
-  t="$(restic snapshots --json --latest 1 --host "$RESTIC_HOST" --path "$MB_CURRENT" 2>/dev/null \
-       | jq -r '.[0].time // empty')" || return 1
+  t="$(restic snapshots --json --host "$RESTIC_HOST" 2>/dev/null \
+       | jq -r 'map(.time) | max // empty')" || return 1
   [ -n "$t" ] || return 1
   echo $(( $(date +%s) - $(date -d "$t" +%s) ))
 }
@@ -303,6 +236,16 @@ next_run() {
   next=$(date -d "today $CFG_BACKUP_TIME" +%s)
   [ "$next" -gt "$now" ] || next=$(date -d "tomorrow $CFG_BACKUP_TIME" +%s)
   echo "$next"
+}
+
+engine_message() {
+  if [ -n "$REPO_PROBLEM" ]; then
+    printf '%s' "$REPO_PROBLEM"
+  elif [ "$PAIRS_PROBLEMS" -gt 0 ]; then
+    printf '%s' "Running. $PAIRS_PROBLEMS folder(s) need attention: see the Folders page."
+  else
+    printf 'Running.'
+  fi
 }
 
 if [ "$CFG_BACKUP_ON_START" = 1 ]; then
@@ -317,19 +260,21 @@ while true; do
   load_settings
   NEXT_BACKUP="$(next_run)"
   log "Next backup: $(date -d "@$NEXT_BACKUP" '+%Y-%m-%d %H:%M %Z')"
-  set_state running "${REPO_PROBLEM:-Running.}"
+  set_state running "$(engine_message)"
   # Wake every minute: re-read settings, and re-compute so clock changes (DST, NTP)
   # don't push the run off.
   while [ "$(date +%s)" -lt "$NEXT_BACKUP" ]; do
     left=$(( NEXT_BACKUP - $(date +%s) ))
     wait_checking $(( left < 60 ? left : 60 ))
     load_settings
+    sync_pairs
+    set_state running "$(engine_message)"
     new="$(next_run)"
     if [ "$new" != "$NEXT_BACKUP" ] && [ "$new" -gt "$(date +%s)" ] \
        && [ "$(date -d "@$new" +%H:%M)" != "$(date -d "@$NEXT_BACKUP" +%H:%M)" ]; then
       NEXT_BACKUP="$new"
       log "Backup time changed. Next backup: $(date -d "@$NEXT_BACKUP" '+%Y-%m-%d %H:%M %Z')"
-      set_state running "${REPO_PROBLEM:-Running.}"
+      set_state running "$(engine_message)"
     fi
   done
   run_backup

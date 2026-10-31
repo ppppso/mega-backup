@@ -1,26 +1,32 @@
 # mega-backup
 
-Keeps an independent backup of one MEGA folder on your Umbrel's disk, in case
-something happens to MEGA (account closed, files deleted, files corrupted).
+Keeps an independent backup of one or more MEGA folders on your Umbrel's disk, in
+case something happens to MEGA (account closed, files deleted, files corrupted).
 
 ```
-MEGA cloud folder  <── MEGAcmd sync (official, 2-way) ──>  current/   (Umbrel disk)
-                                                              │
-                                                   nightly `restic backup`
-                                                              ▼
-                                                 repo/   (restic repository:
-                                                 deduplicated, encrypted snapshots)
+MEGA /Photos  <── MEGAcmd sync (official, 2-way) ──>  current/Photos   (Umbrel disk)
+MEGA /Work    <── MEGAcmd sync (official, 2-way) ──>  current/Work
+                                                          │
+                                         nightly `restic backup`, one snapshot per folder
+                                                          ▼
+                                             repo/   (restic repository:
+                                             deduplicated, encrypted snapshots)
 ```
 
-- **`current/`** is a live mirror of the MEGA folder, kept up to date by MEGA's
-  official MEGAcmd client.
-- **`repo/`** holds the history. Every night a restic snapshot of `current/` is taken.
+- **Folders.** Each MEGA folder you pick (on the Setup page, then the Folders page) is
+  synced with a sub-folder of the same name in `current/`, by MEGA's official MEGAcmd
+  client. Folders can be added and removed at any time. Two synced MEGA folders can't
+  be inside one another (MEGA doesn't allow nested syncs).
+- **`repo/`** holds the history. Every night each folder gets its own restic snapshot.
   Snapshots are deduplicated, so 90 daily + 24 monthly snapshots cost little more
   than one copy, as long as most files don't change.
+- **Space is freed.** After every backup, snapshots past the retention period are
+  removed and `restic prune` deletes the data no remaining snapshot needs.
 
-> **Rule: don't write into `current/`.** The sync is two-way. Anything you add, change
-> or delete there is copied up to MEGA. (Deletions end up in MEGA's rubbish bin, so
-> they are recoverable, but don't rely on that.)
+> **Rule: don't write into the synced folders unless you mean it.** The sync is
+> two-way. Anything you add, change or delete there is copied up to MEGA. (Deletions
+> end up in MEGA's rubbish bin, so they are recoverable, but don't rely on that.)
+> Other items directly in `current/` are not synced and not backed up.
 
 ## What it protects against
 
@@ -42,7 +48,7 @@ MEGA cloud folder  <── MEGAcmd sync (official, 2-way) ──>  current/   (U
    nano .env
    ```
 2. In `.env`, set `TZ` and check the paths (see [Paths on Umbrel](#paths-on-umbrel)).
-   `MEGA_REMOTE_PATH` is optional: you can pick the MEGA folder in the web page instead.
+   `MEGA_REMOTE_PATH` is optional: you pick MEGA folders in the web page instead.
    Set `APP_PASSWORD` to choose the web page's password (otherwise one is generated).
 3. Build and start:
    ```sh
@@ -60,9 +66,9 @@ MEGA cloud folder  <── MEGAcmd sync (official, 2-way) ──>  current/   (U
      `config/`, so this survives restarts and rebuilds.
    - **Backup password:** copy the restic password into your password manager
      **now**. Without it the backups can't be read, not even by you.
-   - **What to back up:** browse your MEGA folders and pick one (skipped if
-     `MEGA_REMOTE_PATH` is set).
-6. The Status page then shows the sync downloading into `current/`. The first backup
+   - **What to sync:** browse your MEGA folders and pick one (skipped if
+     `MEGA_REMOTE_PATH` is set). Add more later on the **Folders** page.
+6. The Status page then shows the sync downloading into `current/<folder>`. The first backup
    runs at `BACKUP_TIME`. To run one right away (after the download finishes):
    `docker exec mega-backup backup.sh`.
 
@@ -79,9 +85,14 @@ Use `exit --only-shell`: a plain `exit` (or `quit`) stops the MEGAcmd server too
 password on the command line. MEGAcmd can't take passwords containing `"` or `\`,
 in the web page or the terminal.
 
-The sync is only created if `current/` is empty. That avoids merging stray local
-files up into MEGA by mistake. Override with `ALLOW_NONEMPTY_INIT=1` only if you
-want that merge.
+A folder's sync is only created if its local folder is empty (or new). That avoids
+merging stray local files up into MEGA by mistake; the web page asks before merging.
+
+**Upgrading from 1.0 (one MEGA folder):** on the first start, the app removes the old
+sync (nothing changes on MEGA), moves the content of `current/` into
+`current/<name of the MEGA folder>/`, and syncs that folder again. MEGA finds the
+files already there and transfers nothing. Snapshots taken before stay available on
+the Snapshots page ("Whole MEGA folder") until they expire.
 
 **Portainer:** the Umbrel App Store's Portainer may not build images from a
 Dockerfile on the device (not tested). The SSH route above is the supported one.
@@ -112,6 +123,7 @@ docker exec mega-backup mega-sync-issues           # details if ERROR says "Sync
 docker exec mega-backup restic snapshots           # list backups
 docker exec mega-backup backup.sh                  # run a backup now
 docker exec mega-backup restic stats --mode raw-data   # space used by the repo
+docker exec mega-backup forget.sh --snapshot <id>  # delete a snapshot and free its space
 ```
 
 ## Restore
@@ -123,17 +135,18 @@ Snapshots live in the restic repo, not as plain folders. To get files back:
 docker exec mega-backup restic snapshots
 
 # 2. Look inside it / compare two snapshots
-docker exec mega-backup restic ls 1a2b3c4d /data/current/Some/Folder
+docker exec mega-backup restic ls 1a2b3c4d /data/current/Photos/Some/Folder
 docker exec mega-backup restic diff 1a2b3c4d 5e6f7a8b
 
 # 3. Restore (everything, or only some paths) into RESTORE_DIR
 docker exec mega-backup restic restore 1a2b3c4d --target /data/restore
-docker exec mega-backup restic restore 1a2b3c4d --target /data/restore --include /data/current/Some/Folder
+docker exec mega-backup restic restore 1a2b3c4d --target /data/restore --include /data/current/Photos/Some/Folder
 ```
 
 Files appear in `RESTORE_DIR` on the host under `data/current/...`. Copy them where
 you need them. To put them back on MEGA, upload them in the MEGA app, or copy them
-into `current/` (they will sync up).
+into the synced folder (they will sync up). The web page's Snapshots page does all
+of this with buttons, and never overwrites anything.
 
 `restic mount` (browse snapshots as folders) is not available in this container.
 
@@ -146,16 +159,18 @@ the `repo/` folder and the password:
 Set `HEALTHCHECK_URL` to a [healthchecks.io](https://healthchecks.io) check (free) to
 get an email when a nightly run fails or doesn't happen. A run reports **fail** when:
 
-- the MEGA sync isn't healthy (paused, error, sync issues, not logged in);
-- `current/` is empty (no backup is taken);
+- a folder's MEGA sync isn't healthy (paused, error, sync issues, not logged in);
+- a folder is empty (no backup is taken of it; the other folders are still backed up);
 - the repo can't be opened, or a restic command fails;
 - **more than `MAX_DROP_PERCENT` of files were removed, or more than
   `MAX_CHANGE_PERCENT` changed content, since the previous backup.**
 
 The last case means something may have deleted or overwritten many files on MEGA.
-The backup is still taken, but **pruning old snapshots stops** and stays stopped
-until you clear it. Normal pruning would otherwise slowly remove the good snapshots.
-Each night keeps failing with "prune on hold" as a reminder. To handle it:
+The backup is still taken, but **removing old snapshots stops** and stays stopped
+until you clear it (the Status page links to the details, with a button). Normal
+clean-up would otherwise slowly remove the good snapshots. While it is on hold the
+Backup folder grows, and each night keeps failing with "prune on hold" as a reminder.
+Without the web page:
 
 ```sh
 docker exec mega-backup cat /config/prune-hold         # what happened, which snapshots
@@ -167,13 +182,33 @@ docker exec mega-backup rm /config/prune-hold
 
 Changing only file timestamps doesn't count as a change. Content changes do.
 
+## How old snapshots are removed
+
+After every backup (also one with problems, such as an unreadable file):
+
+1. **Folders that are synced:** each keeps every snapshot from the last 2 days, then
+   one per day for `KEEP_DAILY` days and one per month for `KEEP_MONTHLY` months.
+2. **Folders that are no longer synced** (removed on the Folders page, or the single
+   folder from before 1.1): their snapshots stay until the newest one is older than
+   the retention period (`KEEP_MONTHLY` months, or `KEEP_DAILY` days if longer), then
+   they are all removed. They can also be deleted right away on the Snapshots page.
+3. `restic prune` deletes the data that no remaining snapshot uses. The Status page
+   shows the Backup folder's size and what the last clean-up freed.
+
+The Snapshots page's **Kept until** column shows, for each snapshot, which rule keeps
+it and an estimated date (assuming a backup every night from now on; days without a
+backup push the dates later). Only a prune hold (above) stops steps 1 and 2. Single snapshots can be deleted on
+their page; files that other snapshots also contain stay, so this may free little.
+
 ## Safety guards
 
-- **Empty folder at startup.** Once the sync is set up, if `current/` is ever empty when
-  the container starts (disk not mounted, wrong `SYNC_DIR`), MEGAcmd is **not started**.
-  The logs say why. This stops an empty folder from being synced up to MEGA as "delete
-  everything". If the MEGA folder really is empty on purpose:
-  `docker exec mega-backup rm /config/sync-established`.
+- **Empty folder at startup.** Once a folder's sync is set up and has files, if that
+  folder is ever empty or missing when the container starts (disk not mounted, wrong
+  `SYNC_DIR`), MEGAcmd is **not started**. The Status page and the logs say why. This
+  stops an empty folder from being synced up to MEGA as "delete everything". If the
+  folder really is empty on purpose, confirm it on the Status page.
+- **Folder list.** A sync is only removed when you remove its folder on the Folders
+  page. If `config/pairs.json` can't be read, nothing is changed.
 - **Missing repo.** If `repo/` disappears after it was created, a new empty repo is
   **not** created silently. Backups fail until the disk/mount is fixed.
 - **Missed runs.** If the container was down at `BACKUP_TIME` and the last backup is
@@ -188,7 +223,7 @@ over `.env`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MEGA_REMOTE_PATH` | empty | MEGA folder to back up (or pick it on the Setup page) |
+| `MEGA_REMOTE_PATH` | empty | first MEGA folder to sync, if none is set up yet (or pick it on the Setup page) |
 | `WEB_PORT` | 2947 | port of the web page on this machine |
 | `APP_PASSWORD` | generated | password for the web page (`/config/app-password` if generated) |
 | `CONFIG_DIR` / `SYNC_DIR` / `REPO_DIR` / `RESTORE_DIR` | see `.env.example` | host folders |
@@ -200,7 +235,7 @@ over `.env`.
 | `CHECK_WEEKDAY` / `CHECK_READ_PERCENT` | 7 / 5 | weekly repo check |
 | `HEALTHCHECK_URL` | empty | healthchecks.io-style ping URL |
 | `BACKUP_ON_START` | 0 | 1 = back up on every container start |
-| `ALLOW_NONEMPTY_INIT` | 0 | 1 = allow creating the sync into a non-empty folder |
+| `ALLOW_NONEMPTY_INIT` | 0 | 1 = with `MEGA_REMOTE_PATH`: allow syncing into a non-empty folder |
 
 Retention keeps every snapshot from the last 2 days, then one per day (the day's
 last) for `KEEP_DAILY` days and one per month for `KEEP_MONTHLY` months.
@@ -259,6 +294,9 @@ docker compose build
 # backup.sh logic (no MEGA account needed), inside the image:
 docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint bash \
   mega-backup:local /tests/backup_test.sh
+# folder pairs (MEGAcmd faked): guard, migration, adding/removing syncs:
+docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint bash \
+  mega-backup:local /tests/pairs_test.sh
 # web UI (MEGAcmd faked): app login, CSRF, MEGA login incl. 2FA, setup, status:
 docker run --rm -u 1000:1000 -v "$PWD/tests:/tests:ro" --entrypoint python3 \
   mega-backup:local -I /tests/web_test.py
@@ -274,14 +312,29 @@ don't trip the alert; mass deletion and mass overwrite set the sticky prune hold
 retention with old snapshots (dry run and real); stale lock left by a killed restic;
 no concurrent runs; repo ID mismatch / missing repo; `last-run.json`; settings
 precedence and invalid values; refusing to back up when the Backup folder isn't
-mounted; healthcheck start/fail/success pings with the log as body.
+mounted; healthcheck start/fail/success pings with the log as body; clean-up runs
+after a partial backup; prune frees the space of forgotten snapshots; one snapshot per
+folder, compared only with its own folder; an empty folder doesn't stop the others;
+snapshots of folders no longer synced expire (but not with a broken folder list, and
+never those of a synced folder); deleting snapshots by hand (`forget.sh`).
+
+`pairs_test.sh` covers: the start-up guard (empty or missing folder, MEGA folder not
+mounted); the move from the single-folder setup (old sync removed, everything moved
+incl. hidden files and a same-name folder, markers moved, resumes after a crash);
+syncs created and removed per folder (files kept); non-empty folders need the merge
+confirmation; missing and nested MEGA folders refused; unknown syncs and a broken or
+empty folder list never remove a sync.
 
 `web_test.py` covers: every page needs the app login; CSRF on every form; login
 rate limit; no open redirect; MEGA login (wrong password, OK, 2FA, input checks; the
 password never reaches a command line, environment or file, and the shell is left
-with `exit --only-shell`); restic password step; MEGA folder browser and start
-(non-empty folder needs the merge confirmation; bad paths refused); status API;
-prune hold and running-backup detection; log page; settings precedence/validation.
+with `exit --only-shell`); restic password step; MEGA folder browser and first folder
+(non-empty folder needs the merge confirmation; bad paths and names refused); Folders
+page (add, nested/duplicate refused, remove, re-add only after the sync is gone, merge
+button, unsynced items listed, broken list never overwritten); empty-folder guard
+confirmation; status API; snapshots per folder (browse, diff within the folder,
+folders no longer synced, delete a folder's snapshots or one snapshot); prune hold and
+running-backup detection; log page; settings precedence/validation.
 
 `container_test.sh` covers: first start (password, repo init, login hint, one server
 as PUID, web UI up as PUID and behind its login, health check passes when logged
@@ -297,14 +350,16 @@ folder; MEGAcmd not started when the MEGA folder isn't mounted after a sync exis
 Files: `scripts/entrypoint.sh` (root: machine-id, permissions, drop to PUID),
 `supervise.sh` (runs the engine and the web UI; stops both if one exits),
 `logsink.py` (copies output to `config/logs/app.log`), `main.sh` (the engine: guards,
-repo setup, MEGAcmd, login and setup wait, sync, scheduler), `backup.sh` (one nightly
-run), `healthcheck.sh` (MEGAcmd server and web UI up), `as-user.sh` (makes `docker exec` commands run as
+repo setup, MEGAcmd, login and setup wait, syncs, scheduler), `pairs.sh` (folder
+pairs: guard, migration, creating/removing syncs), `backup.sh` (one nightly run),
+`forget.sh` (delete snapshots and prune), `healthcheck.sh` (MEGAcmd server and web UI up), `as-user.sh` (makes `docker exec` commands run as
 PUID; the Dockerfile puts a wrapper for every `mega-*` command and `restic` in front of
 the real ones), `lib.sh` (shared helpers, settings loader, mount checks).
 `share/settings-schema.json` lists every setting with its default and validation;
 the engine and the web UI both read it. `web/` is the web UI (Flask, served by
 waitress): `app.py` (pages, login, CSRF), `engine.py` (reads state), `megalogin.py`
-(MEGA login through the `mega-cmd` shell), `settings.py`.
+(MEGA login through the `mega-cmd` shell), `settings.py`, `pairs.py` (the folder list),
+`restic.py` (snapshots, browse, restore), `jobs.py` (background jobs).
 
 ### Releasing
 
