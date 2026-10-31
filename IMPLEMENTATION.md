@@ -20,7 +20,7 @@ Decided items are marked ✅ with the date.
 
 | # | Question | Options | R |
 |---|---|---|---|
-| D1 | Where does the backup history (`repo/`) live? | (a) a folder you pick in the app's Umbrel settings, in Home or on an external drive; backups stay off until one is picked · (b) default under Home › Downloads (the only default location Umbrel apps can use today) · (c) inside the app's data (**deleted on uninstall**) | ✅ **(a)** (2026-10-29) |
+| D1 | Where does the backup history (`repo/`) live? | (a) a folder you pick in the app's Umbrel settings, in Home or on an external drive; backups stay off until one is picked · (b) default under Home › Downloads (the only default location Umbrel apps can use today) · (c) inside the app's data (**deleted on uninstall**) | ✅ **(a)** (2026-10-29); changed to **(b)** on 2026-10-31 so the install dialog asks for all three folders (default `Downloads/mega-backup`, the note says to use another drive if there is one) |
 | D2 | Where does the MEGA mirror (`current/`) live? | (a) inside the app's data, excluded from Umbrel backups, not visible in Files · (b) a Home folder you pick, so you can browse it in Files (it gets indexed; files written there go up to MEGA) | ✅ **(b)** (2026-10-29): you browse your MEGA files in Files, and files you add there go up to MEGA. Restic snapshots are the safety net. Setup refuses a non-empty folder unless you confirm the merge |
 | D3 | App login in addition to Umbrel's? | (a) yes: a per-install app password, shown on Umbrel's app page · (b) no, rely on Umbrel's login only | ✅ **(a)** (2026-10-29), see §6 |
 | D4 | Allow turning snapshots (restic) off? | (a) yes, with a clear warning that a mirror alone isn't a backup · (b) no | ✅ **(a)**, default on (2026-10-29) |
@@ -117,9 +117,9 @@ container (user 1000, after a short root step)
 | In container | Umbrel package | Plain compose | Notes |
 |---|---|---|---|
 | `/config` | `${APP_DATA_DIR}/data/config` | `./config` | MEGA session, restic password, settings, state. Included in Umbrel backups (on purpose, see §6) |
-| `/data/current` | folderAccess **"MEGA folder"** (D2b), visible in Files | `SYNC_DIR` | Two-way with MEGA. Must not contain the Backup folder (checked at setup) |
-| `/data/repo` | folderAccess **"Backup folder"** (D1a) | `REPO_DIR` | Survives uninstall. Must be a real mount (§5) |
-| `/data/restore` | folderAccess **"Restore folder"** (default: Downloads) | `RESTORE_DIR` | Where restores go, visible in Files |
+| `/data/current` | folderAccess **"MEGA folder"** (D2b; default: `Downloads/MEGA`), visible in Files | `SYNC_DIR` | Two-way with MEGA. Must not contain the Backup folder (checked at setup) |
+| `/data/repo` | folderAccess **"Backup folder"** (D1; default: `Downloads/mega-backup`) | `REPO_DIR` | Survives uninstall. Must be a real mount (§5) |
+| `/data/restore` | folderAccess **"Restore folder"** (default: `Downloads/mega-restores`) | `RESTORE_DIR` | Where restores go, visible in Files |
 
 ---
 
